@@ -966,3 +966,177 @@ test('Server authorization and sanitization block Infinity/NaN inputs, relay spo
   assert.ok(typeof mig2.hostToken === 'string' && mig2.hostToken !== hostRole.hostToken);
   assert.equal(mig3.hostToken, undefined);
 });
+
+test('First joiner stays Menu Manager while simulation host smoothly hands over to lowest-latency peer', (t) => {
+  const coord = new P2PCoordinator({ hostEvalIntervalMs: 5000 });
+  t.after(() => coord.stop());
+
+  const ws1 = createRecordingSocket();
+  const ws2 = createRecordingSocket();
+  const ws3 = createRecordingSocket();
+
+  const p1 = coord.handleJoin(ws1, { name: 'MenuOwner' });
+  const p2 = coord.handleJoin(ws2, { name: 'LowPingHost' });
+  const p3 = coord.handleJoin(ws3, { name: 'MidPingGuest' });
+
+  const role1 = ws1.sent.find((m) => m.t === MSG.P2P_ROLE);
+  assert.equal(role1.managerId, p1);
+  assert.equal(role1.hostId, p1);
+  assert.equal(role1.isManager, true);
+
+  coord.handleMessage(p1, {
+    t: MSG.P2P_CHECKPOINT,
+    hostToken: role1.hostToken,
+    checkpoint: {
+      seq: 2,
+      players: [
+        { id: p1, name: 'MenuOwner', essence: 250 },
+        { id: p2, name: 'LowPingHost', essence: 175 },
+        { id: p3, name: 'MidPingGuest', essence: 175 },
+      ],
+    },
+  });
+
+  // Report latency: p1 has high ping, p2 has ultra-low RTT toward lobby peers
+  coord.handleMessage(p1, { t: MSG.P2P_LATENCY, rtt: 190, jitter: 35, fps: 60 });
+  coord.handleMessage(p2, { t: MSG.P2P_LATENCY, rtt: 18, jitter: 2, fps: 60, peerRtts: { [p1]: 190, [p3]: 22 } });
+  coord.handleMessage(p3, { t: MSG.P2P_LATENCY, rtt: 55, jitter: 6, fps: 60, peerRtts: { [p1]: 210, [p2]: 22 } });
+
+  ws1.sent.length = 0;
+  ws2.sent.length = 0;
+  ws3.sent.length = 0;
+
+  // Phase 1: Coordinator requests immediate checkpoint prep from current host p1
+  const targetId = coord.evaluateLobbyBestHost('lobby_1', { immediate: false, force: true });
+  assert.equal(targetId, p2);
+  const prepMsg = ws1.sent.find((m) => m.t === MSG.P2P_PREP_MIGRATE);
+  assert.ok(prepMsg);
+  assert.equal(prepMsg.targetHostId, p2);
+
+  // Phase 2: p1 sends final pre-handover checkpoint -> coordinator seamlessly switches host to p2
+  coord.handleMessage(p1, {
+    t: MSG.P2P_CHECKPOINT,
+    hostToken: role1.hostToken,
+    checkpoint: {
+      seq: 3,
+      players: [
+        { id: p1, name: 'MenuOwner', essence: 310 },
+        { id: p2, name: 'LowPingHost', essence: 175 },
+        { id: p3, name: 'MidPingGuest', essence: 175 },
+      ],
+    },
+  });
+
+  assert.equal(coord.hostId, p2, 'lowest-latency peer p2 must become simulation host');
+  assert.equal(coord.managerId, p1, 'first joiner p1 must remain Lobby Menu Manager');
+
+  const mig1 = ws1.sent.find((m) => m.t === MSG.P2P_HOST_MIGRATE);
+  const mig2 = ws2.sent.find((m) => m.t === MSG.P2P_HOST_MIGRATE);
+  const mig3 = ws3.sent.find((m) => m.t === MSG.P2P_HOST_MIGRATE);
+  assert.ok(mig1 && mig2 && mig3);
+  assert.equal(mig2.reason, 'latency');
+  assert.equal(mig2.newHostId, p2);
+  assert.equal(mig2.managerId, p1);
+  assert.ok(typeof mig2.hostToken === 'string' && mig2.hostToken !== role1.hostToken);
+  assert.equal(mig1.hostToken, undefined);
+  assert.equal(mig3.hostToken, undefined);
+  assert.equal(
+    mig2.checkpoint.players.find((pl) => pl.id === p1)?.essence,
+    310,
+    'previous host p1 must stay in checkpoint on latency handover'
+  );
+
+  // Verify GameRoom enforces separated Manager permissions after checkpoint restore
+  const room = new GameRoom();
+  room.importCheckpoint(mig2.checkpoint, () => createRecordingSocket());
+  assert.equal(room.hostId, p2);
+  assert.equal(room.managerId, p1);
+
+  const rp1 = room.players.get(p1);
+  const rp2 = room.players.get(p2);
+  assert.equal(room.canManageRoom(rp1), true, 'p1 retains menu control even while p2 hosts simulation');
+  assert.equal(room.canManageRoom(rp2), false, 'low-latency simulation host p2 does not steal menu control');
+
+  room.handleClientMessage(rp2, { t: MSG.MATCH_CMD, cmd: 'add_bot' });
+  assert.equal(room.bots.size, 0, 'non-manager host cannot add bots');
+  room.handleClientMessage(rp1, { t: MSG.MATCH_CMD, cmd: 'add_bot' });
+  assert.equal(room.bots.size, 1, 'menu manager p1 can add bots while hosted on p2');
+
+  // Verify NetClient.canManageServer tracks separated managerId independently of isHost
+  const netManagerGuest = new NetClient({ url: 'ws://mock' });
+  netManagerGuest.playerId = p1;
+  netManagerGuest.hostId = p2;
+  netManagerGuest.managerId = p1;
+  netManagerGuest.isHost = false;
+  netManagerGuest.knownPeers.set(p1, { peerId: p1 });
+  netManagerGuest.knownPeers.set(p2, { peerId: p2 });
+  assert.equal(netManagerGuest.canManageServer(), true);
+
+  const netHostNonManager = new NetClient({ url: 'ws://mock' });
+  netHostNonManager.playerId = p2;
+  netHostNonManager.hostId = p2;
+  netHostNonManager.managerId = p1;
+  netHostNonManager.isHost = true;
+  netHostNonManager.knownPeers.set(p1, { peerId: p1 });
+  netHostNonManager.knownPeers.set(p2, { peerId: p2 });
+  assert.equal(netHostNonManager.canManageServer(), false);
+});
+
+test('Reconciled shooter origin and multi-sample lag compensation register hits across jitter and peeking', () => {
+  const room = new GameRoom();
+  const shooter = room.createPlayerEntity('s1', 'Peeker', null, false, TEAMS.CRIMSON);
+  const victim = room.createPlayerEntity('v1', 'StrafeTarget', null, false, TEAMS.AZURE);
+  room.players.set(shooter.id, shooter);
+  room.players.set(victim.id, victim);
+
+  // Shooter server state is 0.35m right of client-predicted peek in unobstructed western lane (x=-19.5, z=8 -> -4)
+  shooter.x = -19.15;
+  shooter.y = 0;
+  shooter.z = 8.0;
+
+  const tShot = room.now - 100;
+  // At tShot-24ms target crossed x=-19.5; at tShot target stepped sideways by 0.65m (within 28ms jitter window)
+  room.history.push({
+    t: tShot - 24,
+    positions: new Map([
+      ['v1', { x: -19.5, y: 0, z: -4.0 }],
+      ['s1', { x: -19.5, y: 0, z: 8.0 }],
+    ]),
+  });
+  room.history.push({
+    t: tShot,
+    positions: new Map([
+      ['v1', { x: -18.85, y: 0, z: -4.0 }],
+      ['s1', { x: -19.15, y: 0, z: 8.0 }],
+    ]),
+  });
+  victim.x = -18.4;
+  victim.y = 0;
+  victim.z = -4.0;
+  room.history.push({
+    t: room.now,
+    positions: new Map([
+      ['v1', { x: -18.4, y: 0, z: -4.0 }],
+      ['s1', { x: -19.15, y: 0, z: 8.0 }],
+    ]),
+  });
+
+  const hpBefore = victim.hp;
+  room.handleAction(shooter, {
+    kind: 'primary',
+    yaw: 0,
+    pitch: -0.01,
+    sx: -19.5,
+    sy: 0,
+    sz: 8.0,
+    viewTime: tShot,
+  });
+  assert.ok(victim.hp < hpBefore, 'reconciled peek origin + jitter window should reliably register hit');
+
+  // Spoofed sx/sz trying to shoot through solid mid_pillar_3 (minX=8.4..10.6, z=8.4..10.6) must fall back to serverEye
+  shooter.x = 7.8;
+  shooter.y = 0;
+  shooter.z = 9.5;
+  const wallBlockedEye = room._resolveReconciledEye(shooter, { sx: 9.0, sy: 0, sz: 9.5 });
+  assert.equal(wallBlockedEye.x, 7.8, 'cannot reconcile shooter origin through a solid wall');
+});

@@ -24,9 +24,11 @@ export class NetClient {
 
     this.isHost = false;
     this.hostId = null;
+    this.managerId = null;
     this.lobbyId = null;
     this.authToken = null;
     this.hostToken = null;
+    this.fps = 60;
     this.transportMode = 'connecting'; // 'host' | 'p2p-udp' | 'p2p-relay' | 'connecting'
     this.iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
 
@@ -54,12 +56,16 @@ export class NetClient {
   }
 
   canManageServer() {
-    if (this.isHost) return true;
-    if (this.playerId && this.hostId && this.playerId === this.hostId) return true;
     let humanPeers = 0;
     for (const p of this.knownPeers.values()) {
       if (p && p.peerId) humanPeers++;
     }
+    if (this.playerId && humanPeers === 1) return true;
+    if (this.managerId) {
+      return Boolean(this.playerId && this.playerId === this.managerId);
+    }
+    if (this.isHost) return true;
+    if (this.playerId && this.hostId && this.playerId === this.hostId) return true;
     return Boolean(this.playerId && humanPeers <= 1);
   }
 
@@ -390,6 +396,7 @@ export class NetClient {
       this.authToken = msg.authToken || null;
       this.hostToken = msg.hostToken || null;
       this.hostId = msg.hostId;
+      this.managerId = msg.managerId || msg.hostId || null;
       this.isHost = Boolean(msg.isHost);
       if (Array.isArray(msg.iceServers) && msg.iceServers.length > 0) {
         this.iceServers = msg.iceServers;
@@ -429,6 +436,7 @@ export class NetClient {
     }
 
     if (msg.t === MSG.P2P_PEER_LEFT) {
+      if (msg.managerId) this.managerId = msg.managerId;
       this.knownPeers.delete(msg.peerId);
       this._closePeerConnection(msg.peerId);
       if (this.isHost && this.hostEngine) {
@@ -469,10 +477,23 @@ export class NetClient {
       return;
     }
 
+    if (msg.t === MSG.P2P_PREP_MIGRATE) {
+      if (this.isHost && this.hostEngine) {
+        this.hostEngine.requestImmediateCheckpoint((cp) => {
+          if (cp) {
+            this.latestCheckpoint = cp;
+            this._sendSignal({ t: MSG.P2P_CHECKPOINT, hostToken: this.hostToken, checkpoint: cp });
+          }
+        });
+      }
+      return;
+    }
+
     if (msg.t === MSG.P2P_HOST_MIGRATE) {
       const prevHostId = msg.prevHostId || this.hostId;
       this.lobbyId = msg.lobbyId || this.lobbyId;
       this.hostId = msg.newHostId;
+      this.managerId = msg.managerId || this.managerId;
       this.hostToken = msg.hostToken || (this.playerId === msg.newHostId ? this.hostToken : null);
       this.hasClockSync = false;
 
@@ -488,20 +509,30 @@ export class NetClient {
       if (msg.checkpoint && (!this.latestCheckpoint || (msg.checkpoint.seq || 0) >= (this.latestCheckpoint.seq || 0))) {
         this.latestCheckpoint = msg.checkpoint;
       }
-      if (this.latestCheckpoint && Array.isArray(this.latestCheckpoint.players) && prevHostId) {
+      if (
+        this.latestCheckpoint &&
+        Array.isArray(this.latestCheckpoint.players) &&
+        prevHostId &&
+        !this.knownPeers.has(prevHostId)
+      ) {
         this.latestCheckpoint = {
           ...this.latestCheckpoint,
           players: this.latestCheckpoint.players.filter((pl) => pl.id !== prevHostId),
         };
       }
 
-      if (prevHostId) {
+      if (prevHostId && prevHostId !== this.playerId) {
         this._closePeerConnection(prevHostId);
       }
 
       if (this.playerId === msg.newHostId) {
         this._becomeHost(this.latestCheckpoint);
       } else {
+        if (this.hostEngine) {
+          this.hostEngine.stop();
+          this.hostEngine = null;
+        }
+        this._closeAllPeerConnections();
         this.isHost = false;
         this.transportMode = 'p2p-relay';
         this.sendPing();
@@ -511,6 +542,8 @@ export class NetClient {
         this.onHostMigrate({
           isHost: this.isHost,
           hostId: this.hostId,
+          managerId: this.managerId,
+          reason: msg.reason || 'disconnect',
           hostName: msg.hostName || this.hostId,
         });
       }
@@ -523,20 +556,33 @@ export class NetClient {
     if (msg.t === MSG.PONG) {
       const nowPerf = performance.now();
       const sampleRtt = Math.max(0, nowPerf - msg.c);
+      const isSpike = this.hasClockSync && this.rtt > 0 && sampleRtt > this.rtt * 2.4;
       this.jitter = this.lastRtt ? this.jitter * 0.75 + Math.abs(sampleRtt - this.lastRtt) * 0.25 : 0;
       this.lastRtt = sampleRtt;
       this.rtt = this.rtt ? this.rtt * 0.7 + sampleRtt * 0.3 : sampleRtt;
-      const estOffset = msg.s + sampleRtt * 0.5 - nowPerf;
-      this.serverTimeOffset = this.hasClockSync
-        ? this.serverTimeOffset * 0.8 + estOffset * 0.2
-        : estOffset;
-      this.hasClockSync = true;
+      if (!isSpike) {
+        const estOffset = msg.s + sampleRtt * 0.5 - nowPerf;
+        this.serverTimeOffset = this.hasClockSync
+          ? this.serverTimeOffset * 0.8 + estOffset * 0.2
+          : estOffset;
+        this.hasClockSync = true;
+      }
+      if (!this.isHost && this.hostId) {
+        this._sendSignal({
+          t: MSG.P2P_LATENCY,
+          rtt: Math.max(1, Math.round(this.rtt)),
+          jitter: Math.round(this.jitter),
+          fps: Math.round(this.fps || 60),
+          peerRtts: { [this.hostId]: Math.max(1, Math.round(this.rtt)) },
+        });
+      }
       return;
     }
 
     if (msg.t === MSG.WELCOME) {
       this.playerId = msg.id;
       if (msg.hostId) this.hostId = msg.hostId;
+      if (msg.managerId) this.managerId = msg.managerId;
       this.serverTimeOffset = msg.serverTime - performance.now();
       this.hasClockSync = true;
       if (this.onWelcome) this.onWelcome(msg);
@@ -555,6 +601,7 @@ export class NetClient {
 
     if (msg.t === MSG.SNAPSHOT) {
       if (msg.hi) this.hostId = msg.hi;
+      if (msg.mi) this.managerId = msg.mi;
       const snapOffset = msg.st + this.rtt * 0.5 - performance.now();
       if (!this.hasClockSync) {
         this.serverTimeOffset = snapOffset;
@@ -647,6 +694,7 @@ export class NetClient {
     this.connected = false;
     this.isHost = false;
     this.hostId = null;
+    this.managerId = null;
     this.lobbyId = null;
     this.authToken = null;
     this.hostToken = null;
@@ -657,6 +705,14 @@ export class NetClient {
 
   sendPing() {
     if (!this.playerId || !this.hostId) return;
+    if (this.isHost) {
+      this._sendSignal({
+        t: MSG.P2P_LATENCY,
+        rtt: Math.max(1, Math.round(this.rtt || 8)),
+        jitter: Math.round(this.jitter || 1),
+        fps: Math.round(this.fps || 60),
+      });
+    }
     this.send({ t: MSG.PING, c: performance.now() });
   }
 
@@ -703,11 +759,11 @@ export class NetClient {
   }
 
   getInterpDelayMs() {
-    if (this.isHost) return 18;
+    if (this.isHost) return 12;
     if (this.transportMode === 'p2p-udp') {
-      return clamp(24 + this.jitter * 1.4, 24, 115);
+      return clamp(18 + this.jitter * 1.2, 18, 90);
     }
-    return clamp(42 + this.jitter * 1.4, 42, 120);
+    return clamp(30 + this.jitter * 1.2, 30, 100);
   }
 
   getRenderTime() {

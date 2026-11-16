@@ -3,7 +3,9 @@ export const FIXED_DT = 1 / SIM_HZ;
 export const SNAPSHOT_HZ = 30;
 export const SNAPSHOT_INTERVAL_MS = 1000 / SNAPSHOT_HZ;
 export const HISTORY_DURATION_MS = 1000;
-export const MAX_REWIND_MS = 280;
+export const MAX_REWIND_MS = 400;
+export const HOST_EVAL_INTERVAL_MS = 5000;
+export const LAG_COMP_HITBOX_PAD = 0.08;
 
 export const PLAYER_RADIUS = 0.44;
 export const PLAYER_HEIGHT = 1.82;

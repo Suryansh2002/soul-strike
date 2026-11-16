@@ -10,7 +10,7 @@ import {
 } from '../shared/constants.js';
 import { ARENA_BOXES, JUMP_PADS } from '../shared/arena.js';
 import { clamp, getAimDirection, raycastArena, stepPlayerPhysics } from '../shared/physics.js';
-import { EVT, MSG } from '../shared/protocol.js';
+import { EVT, MSG, r3 } from '../shared/protocol.js';
 import { NetClient } from './NetClient.js';
 import { InputManager } from './InputManager.js';
 import { evaluateMobileCombatAssist } from './mobileAssist.js';
@@ -263,6 +263,13 @@ input.onWeaponKey = (weaponId) => {
   lastNonPanWeapon = weaponId;
 };
 
+function flushPendingTicks() {
+  if (outboundTicks.length === 0) return;
+  net.send({ t: MSG.INPUT, ticks: outboundTicks });
+  outboundTicks = [];
+  netSendAccum = 0;
+}
+
 input.onPowerKey = (powerId) => {
   if (!myServerState || !myServerState.al || !myServerState.up.includes(powerId)) return;
   const pw = POWERS[powerId];
@@ -270,6 +277,7 @@ input.onPowerKey = (powerId) => {
   if ((localPowerCds[powerId] || 0) > 0 || (myServerState.cds?.[powerId] || 0) > 0) return;
   if (myServerState.mn < pw.manaCost) return;
 
+  flushPendingTicks();
   renderer.cancelLocalEmote();
   localPowerCds[powerId] = 0.3;
   if (powerId === 'blink') sfx.blink();
@@ -282,6 +290,9 @@ input.onPowerKey = (powerId) => {
     id: powerId,
     yaw: input.yaw,
     pitch: input.pitch,
+    sx: r3(predState.x),
+    sy: r3(predState.y),
+    sz: r3(predState.z),
     viewTime: net.getRenderTime(),
   });
 };
@@ -291,10 +302,12 @@ net.onWelcome = (msg) => {
 };
 
 net.onHostMigrate = (info) => {
-  hud.showEmoteToast(
-    info.isHost ? 'HOST MIGRATED — YOU ARE NOW HOST!' : `HOST MIGRATED TO ${info.hostName || info.hostId}`,
-    'pan-toast'
-  );
+  if (info.reason !== 'latency') {
+    hud.showEmoteToast(
+      info.isHost ? 'HOST MIGRATED — YOU ARE NOW HOST!' : `HOST MIGRATED TO ${info.hostName || info.hostId}`,
+      'pan-toast'
+    );
+  }
 };
 
 net.onHitConfirm = (msg) => {
@@ -527,11 +540,15 @@ function tryPrimaryAttack() {
     renderer.addSlashArc(eye.x + dir.x * 0.7, eye.y - 0.15 + dir.y * 0.7, eye.z + dir.z * 0.7, input.yaw, input.pitch, w.color);
   }
 
+  flushPendingTicks();
   net.send({
     t: MSG.ACTION,
     kind: 'primary',
     yaw: input.yaw,
     pitch: input.pitch,
+    sx: r3(predState.x),
+    sy: r3(predState.y),
+    sz: r3(predState.z),
     viewTime: net.getRenderTime(),
   });
 }
@@ -547,7 +564,10 @@ function loop(now) {
 
   const dt = Math.min(0.08, (now - lastFrame) / 1000);
   lastFrame = now;
-  if (dt > 0) fpsSmoothed = fpsSmoothed * 0.9 + (1 / dt) * 0.1;
+  if (dt > 0) {
+    fpsSmoothed = fpsSmoothed * 0.9 + (1 / dt) * 0.1;
+    net.fps = fpsSmoothed;
+  }
 
   localWeaponCd = Math.max(0, localWeaponCd - dt);
   for (const k of Object.keys(localPowerCds)) {
@@ -656,12 +676,10 @@ function loop(now) {
     }
   }
 
-  // Flush batched inputs at ~30Hz to keep tunnel traffic super crisp
+  // Flush inputs at 60Hz for minimal movement/fire latency
   netSendAccum += dt;
-  if (netSendAccum >= 1 / 30 && outboundTicks.length > 0) {
-    netSendAccum = 0;
-    net.send({ t: MSG.INPUT, ticks: outboundTicks });
-    outboundTicks = [];
+  if (netSendAccum >= 1 / 60 && outboundTicks.length > 0) {
+    flushPendingTicks();
   }
 
   // Smooth visual reconciliation decay
@@ -708,6 +726,7 @@ function loop(now) {
     fps: fpsSmoothed,
     transport: net.transportMode,
     hostId: net.hostId,
+    managerId: net.managerId,
     canManageServer: net.canManageServer(),
     scoped: isRailScoped,
     targetLocked: isTargetLocked,

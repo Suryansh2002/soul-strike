@@ -543,10 +543,11 @@ export class HudUI {
       this.el.matchEndModal.classList.add('hidden');
     }
 
-    // Scoreboard & Host Settings Permission State
+    // Scoreboard & Manager/Host Settings Permission State
     const resolvedHostId = telemetry.hostId || snap.hi;
+    const resolvedManagerId = telemetry.managerId || snap.mi || resolvedHostId;
     const canManage = Boolean(telemetry.canManageServer);
-    const hostPlayer = snap.pl?.find((p) => p.id === resolvedHostId);
+    const managerPlayer = snap.pl?.find((p) => p.id === resolvedManagerId);
 
     for (const btn of [this.el.btnAddBot, this.el.btnClearBots, this.el.btnToggleMode, this.el.btnResetMatch]) {
       if (!btn) continue;
@@ -555,8 +556,8 @@ export class HudUI {
     }
     if (this.el.hostSettingsNote) {
       this.el.hostSettingsNote.textContent = canManage
-        ? 'Server Controls — You are the Lobby Host'
-        : `Server Controls Locked — Managed by ${hostPlayer ? hostPlayer.n : 'Lobby Host'}`;
+        ? 'Server Controls — You are the Lobby Manager'
+        : `Server Controls Locked — Managed by ${managerPlayer ? managerPlayer.n : 'Lobby Manager'}`;
       this.el.hostSettingsNote.classList.toggle('locked', !canManage);
     }
 

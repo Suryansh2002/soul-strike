@@ -86,6 +86,13 @@ self.onmessage = (event) => {
     return;
   }
 
+  if (msg.type === 'export_now') {
+    if (room) {
+      self.postMessage({ evt: 'checkpoint', checkpoint: room.exportCheckpoint(), immediate: true });
+    }
+    return;
+  }
+
   if (msg.type === 'stop') {
     cleanup();
   }

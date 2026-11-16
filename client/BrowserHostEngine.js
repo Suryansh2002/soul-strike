@@ -14,6 +14,7 @@ export class BrowserHostEngine {
     this.checkpointTimer = null;
     this.endpoints = new Map();
     this.lastCheckpoint = null;
+    this._pendingCheckpointCbs = [];
 
     this.onSendPacket = null;
     this.onCheckpoint = null;
@@ -71,7 +72,12 @@ export class BrowserHostEngine {
             if (this.onSendPacket) this.onSendPacket(msg.toId, msg.raw, Boolean(msg.fast));
           } else if (msg.evt === 'checkpoint') {
             this.lastCheckpoint = msg.checkpoint;
-            if (this.onCheckpoint) this.onCheckpoint(msg.checkpoint);
+            if (msg.immediate && this._pendingCheckpointCbs.length > 0) {
+              const cbs = this._pendingCheckpointCbs.splice(0);
+              for (const fn of cbs) fn(msg.checkpoint);
+            } else if (this.onCheckpoint) {
+              this.onCheckpoint(msg.checkpoint);
+            }
           }
         };
         this.worker = worker;
@@ -131,7 +137,18 @@ export class BrowserHostEngine {
     return this.lastCheckpoint;
   }
 
+  requestImmediateCheckpoint(cb) {
+    if (typeof cb !== 'function') return;
+    if (this.worker) {
+      this._pendingCheckpointCbs.push(cb);
+      this.worker.postMessage({ type: 'export_now' });
+      return;
+    }
+    cb(this.exportCheckpointNow());
+  }
+
   stop() {
+    this._pendingCheckpointCbs = [];
     if (this.worker) {
       try {
         this.worker.postMessage({ type: 'stop' });

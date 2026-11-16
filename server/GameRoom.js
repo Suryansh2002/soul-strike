@@ -7,6 +7,7 @@ import {
   GAME_MODES,
   HISTORY_DURATION_MS,
   HEAD_CENTER_OFFSET,
+  LAG_COMP_HITBOX_PAD,
   MANA_REGEN_BASE,
   MATCH_DURATION_SEC,
   MAX_HP_BASE,
@@ -71,6 +72,7 @@ export class GameRoom {
     this.simInterval = null;
     this.checkpointSeq = 0;
     this.hostId = null;
+    this.managerId = null;
   }
 
   start() {
@@ -191,14 +193,29 @@ export class GameRoom {
     return this.hostId;
   }
 
+  ensureManagerId() {
+    if (this.managerId && this.players.has(this.managerId)) {
+      const current = this.players.get(this.managerId);
+      if (current && !current.isBot) return this.managerId;
+    }
+    this.managerId = null;
+    for (const p of this.players.values()) {
+      if (!p.isBot) {
+        this.managerId = p.id;
+        break;
+      }
+    }
+    return this.managerId;
+  }
+
   canManageRoom(player) {
     if (!player || player.isBot) return false;
-    const currentHostId = this.ensureHostId();
+    const currentManagerId = this.ensureManagerId();
     let humanCount = 0;
     for (const p of this.players.values()) {
       if (!p.isBot) humanCount++;
     }
-    return player.id === currentHostId || humanCount <= 1;
+    return player.id === currentManagerId || humanCount <= 1;
   }
 
   addHumanPlayer(ws, name, preferredTeam, explicitId = null) {
@@ -214,6 +231,7 @@ export class GameRoom {
     const player = this.createPlayerEntity(id, name, ws, false, preferredTeam);
     this.players.set(id, player);
     const hostId = this.ensureHostId();
+    const managerId = this.ensureManagerId();
 
     let humanCount = 0;
     for (const pl of this.players.values()) {
@@ -227,6 +245,7 @@ export class GameRoom {
       t: MSG.WELCOME,
       id,
       hostId,
+      managerId,
       mode: this.mode,
       serverTime: this.now,
       snapshotHz: 1000 / SNAPSHOT_INTERVAL_MS,
@@ -242,10 +261,12 @@ export class GameRoom {
       if (name) player.name = String(name).slice(0, 16);
       player.isBot = false;
       const hostId = this.ensureHostId();
+      const managerId = this.ensureManagerId();
       this.sendTo(player, {
         t: MSG.WELCOME,
         id: peerId,
         hostId,
+        managerId,
         mode: this.mode,
         serverTime: this.now,
         snapshotHz: 1000 / SNAPSHOT_INTERVAL_MS,
@@ -260,6 +281,7 @@ export class GameRoom {
     this.players.delete(id);
     this.bots.delete(id);
     this.ensureHostId();
+    this.ensureManagerId();
   }
 
   addBot() {
@@ -542,8 +564,91 @@ export class GameRoom {
     return ok;
   }
 
+  _flushPendingInputsForAction(player) {
+    let stepped = 0;
+    while (player.inputQueue.length > 0 && player.tickBudget >= 0 && stepped < 3) {
+      const inp = player.inputQueue.shift();
+      player.tickBudget = Math.max(-1, player.tickBudget - 1);
+      stepped++;
+      const wasBlocking = player.blocking;
+      player.blocking = inp.block && player.stamina > 2;
+      if (player.blocking && !wasBlocking) {
+        player.blockStartAt = this.now;
+      }
+      stepPlayerPhysics(player, inp, FIXED_DT, ARENA_BOXES, JUMP_PADS);
+      player.lastAckSeq = inp.seq;
+    }
+  }
+
+  _resolveReconciledEye(player, msg) {
+    const serverEye = { x: player.x, y: player.y + PLAYER_EYE_HEIGHT, z: player.z };
+    if (
+      typeof msg.sx !== 'number' ||
+      !Number.isFinite(msg.sx) ||
+      typeof msg.sy !== 'number' ||
+      !Number.isFinite(msg.sy) ||
+      typeof msg.sz !== 'number' ||
+      !Number.isFinite(msg.sz)
+    ) {
+      return serverEye;
+    }
+    const horizOff = Math.hypot(msg.sx - player.x, msg.sz - player.z);
+    const vertOff = Math.abs(msg.sy - player.y);
+    if (horizOff > 1.35 || vertOff > 1.2) return serverEye;
+
+    const candEye = {
+      x: clamp(msg.sx, -ARENA_HALF_SIZE + 0.3, ARENA_HALF_SIZE - 0.3),
+      y: clamp(msg.sy + PLAYER_EYE_HEIGHT, 0.5, 20),
+      z: clamp(msg.sz, -ARENA_HALF_SIZE + 0.3, ARENA_HALF_SIZE - 0.3),
+    };
+    const dx = candEye.x - serverEye.x;
+    const dy = candEye.y - serverEye.y;
+    const dz = candEye.z - serverEye.z;
+    const deltaLen = Math.hypot(dx, dy, dz);
+    if (deltaLen <= 0.05) return candEye;
+
+    const wall = raycastArena(
+      serverEye,
+      { x: dx / deltaLen, y: dy / deltaLen, z: dz / deltaLen },
+      deltaLen,
+      ARENA_BOXES
+    );
+    return wall ? serverEye : candEye;
+  }
+
+  _findBestMeleeSample(other, baseOrigin, dir, maxRange, minDot, rewindTime, requireLos = false) {
+    const times = [rewindTime, Math.min(this.now, rewindTime + 30), this.now];
+    const baseY = baseOrigin.y - PLAYER_EYE_HEIGHT;
+    let best = null;
+    for (let i = 0; i < times.length; i++) {
+      const pos = i === times.length - 1 ? other : this.getRewoundPosition(other, times[i]);
+      const dx = pos.x - baseOrigin.x;
+      const dy = (pos.y + 1.0) - (baseY + 1.0);
+      const dz = pos.z - baseOrigin.z;
+      const dist = Math.hypot(dx, dy, dz);
+      if (dist > maxRange) continue;
+      const dot = (dx * dir.x + dy * dir.y + dz * dir.z) / Math.max(0.01, dist);
+      if (dot <= minDot) continue;
+      if (requireLos) {
+        const targetDir = {
+          x: dx / Math.max(0.01, dist),
+          y: dy / Math.max(0.01, dist),
+          z: dz / Math.max(0.01, dist),
+        };
+        const wall = raycastArena(baseOrigin, targetDir, dist, ARENA_BOXES);
+        if (wall && wall.dist < dist - 0.35) continue;
+      }
+      if (!best || dist < best.dist) {
+        best = { pos, dist, dy };
+      }
+    }
+    return best;
+  }
+
   handleAction(player, msg) {
     if (!player.alive || this.matchState !== 'playing') return;
+
+    this._flushPendingInputsForAction(player);
 
     const yaw = typeof msg.yaw === 'number' && Number.isFinite(msg.yaw) ? normalizeYaw(msg.yaw) : player.yaw;
     const pitch = clamp(
@@ -556,6 +661,8 @@ export class GameRoom {
 
     const rawViewTime = typeof msg.viewTime === 'number' && Number.isFinite(msg.viewTime) ? msg.viewTime : this.now;
     const rewindTime = clamp(rawViewTime, this.now - MAX_REWIND_MS, this.now);
+    const eye = this._resolveReconciledEye(player, msg);
+    const dir = getAimDirection(yaw, pitch);
 
     const execMult = 1 + (player.runes.executioner || 0) * 0.1;
     const hsBonus = (player.runes.executioner || 0) * 0.15;
@@ -565,9 +672,6 @@ export class GameRoom {
       if (player.weaponCd > 0) return;
       const w = WEAPONS[player.weapon] || WEAPONS.staff;
       player.weaponCd = w.cooldown * cdMult;
-
-      const eye = { x: player.x, y: player.y + PLAYER_EYE_HEIGHT, z: player.z };
-      const dir = getAimDirection(yaw, pitch);
 
       if (w.type === 'hitscan') {
         const res = this.resolveRewoundHitscan(player, eye, dir, w.range, rewindTime);
@@ -601,23 +705,20 @@ export class GameRoom {
           color: w.color,
         });
 
-        // Immediate melee cleave check using rewound positions
+        // Immediate melee cleave check using multi-sample rewound positions
         let hitMelee = false;
         for (const other of this.players.values()) {
           if (!this.isHostile(player, other) || !other.alive) continue;
-          const pos = this.getRewoundPosition(other, rewindTime);
-          const dx = pos.x - player.x;
-          const dy = (pos.y + 1.0) - (player.y + 1.0);
-          const dz = pos.z - player.z;
-          const dist = Math.hypot(dx, dy, dz);
-          if (dist <= w.meleeRange) {
-            const dot = (dx * dir.x + dy * dir.y + dz * dir.z) / Math.max(0.01, dist);
-            if (dot > 0.35) {
-              const hs = dy > 0.4;
-              const dmg = Math.round(w.damage * execMult * (hs ? 1.45 + hsBonus : 1.0));
-              this.applyDamage(player, other, dmg, 'Runeblade', hs, dir, { x: pos.x, y: pos.y + 1.2, z: pos.z });
-              hitMelee = true;
-            }
+          const hit = this._findBestMeleeSample(other, eye, dir, w.meleeRange, 0.35, rewindTime, false);
+          if (hit) {
+            const hs = hit.dy > 0.4;
+            const dmg = Math.round(w.damage * execMult * (hs ? 1.45 + hsBonus : 1.0));
+            this.applyDamage(player, other, dmg, 'Runeblade', hs, dir, {
+              x: hit.pos.x,
+              y: hit.pos.y + 1.2,
+              z: hit.pos.z,
+            });
+            hitMelee = true;
           }
         }
 
@@ -666,27 +767,12 @@ export class GameRoom {
 
         for (const other of this.players.values()) {
           if (!this.isHostile(player, other) || !other.alive) continue;
-          const pos = this.getRewoundPosition(other, rewindTime);
-          const dx = pos.x - player.x;
-          const dy = (pos.y + 1.0) - (player.y + 1.0);
-          const dz = pos.z - player.z;
-          const dist = Math.hypot(dx, dy, dz);
-          if (dist <= w.meleeRange && dist < bestDist) {
-            const dot = (dx * dir.x + dy * dir.y + dz * dir.z) / Math.max(0.01, dist);
-            if (dot > 0.25) {
-              const targetDir = {
-                x: dx / Math.max(0.01, dist),
-                y: dy / Math.max(0.01, dist),
-                z: dz / Math.max(0.01, dist),
-              };
-              const wall = raycastArena(eye, targetDir, dist, ARENA_BOXES);
-              if (!wall || wall.dist >= dist - 0.35) {
-                bestVictim = other;
-                bestDist = dist;
-                bestPos = pos;
-                bestHs = dy > 0.35;
-              }
-            }
+          const hit = this._findBestMeleeSample(other, eye, dir, w.meleeRange, 0.25, rewindTime, true);
+          if (hit && hit.dist < bestDist) {
+            bestVictim = other;
+            bestDist = hit.dist;
+            bestPos = hit.pos;
+            bestHs = hit.dy > 0.35;
           }
         }
 
@@ -735,9 +821,6 @@ export class GameRoom {
 
       player.mana -= pw.manaCost;
       player.powerCds[pw.id] = pw.cooldown * cdMult;
-
-      const eye = { x: player.x, y: player.y + PLAYER_EYE_HEIGHT, z: player.z };
-      const dir = getAimDirection(yaw, pitch);
 
       if (pw.id === 'blink') {
         const start = { x: player.x, y: player.y, z: player.z };
@@ -895,15 +978,29 @@ export class GameRoom {
     let bestVictim = null;
     let bestHit = null;
 
+    const sampleTimes = [
+      rewindTime,
+      Math.max(this.now - MAX_REWIND_MS, rewindTime - 28),
+      Math.min(this.now, rewindTime + 28),
+      this.now,
+    ];
+
     for (const other of this.players.values()) {
       if (!this.isHostile(attacker, other) || !other.alive) continue;
-      const rewoundPos = this.getRewoundPosition(other, rewindTime);
-      const hit = raycastPlayerHitbox(origin, dir, maxDist, rewoundPos);
-      if (hit && hit.dist < maxDist) {
-        maxDist = hit.dist;
+      let matchedHit = null;
+      for (let i = 0; i < sampleTimes.length; i++) {
+        const rewoundPos = i === sampleTimes.length - 1 ? other : this.getRewoundPosition(other, sampleTimes[i]);
+        const hit = raycastPlayerHitbox(origin, dir, maxDist, rewoundPos, LAG_COMP_HITBOX_PAD);
+        if (hit && hit.dist < maxDist) {
+          matchedHit = hit;
+          break;
+        }
+      }
+      if (matchedHit && matchedHit.dist < maxDist) {
+        maxDist = matchedHit.dist;
         bestVictim = other;
-        bestHit = hit;
-        endPoint = hit.point;
+        bestHit = matchedHit;
+        endPoint = matchedHit.point;
       }
     }
 
@@ -1259,11 +1356,16 @@ export class GameRoom {
       let hitHeadshot = false;
       let hitDist = wall ? wall.dist : stepDist + pr.radius;
       const owner = this.players.get(pr.ownerId);
+      const pad = pr.kind === 'pan' ? (pr.extraHitRadius || 0) : (pr.extraHitRadius || 0.12);
 
       for (const other of this.players.values()) {
         if (!other.alive || other.id === pr.ownerId) continue;
         if (owner && !this.isHostile(owner, other)) continue;
-        const hit = raycastPlayerHitbox(origin, dir, hitDist, other, pr.extraHitRadius || 0);
+        let hit = raycastPlayerHitbox(origin, dir, hitDist, other, pad);
+        if (!hit && pr.kind !== 'pan') {
+          const rewoundPos = this.getRewoundPosition(other, this.now - 40);
+          hit = raycastPlayerHitbox(origin, dir, hitDist, rewoundPos, pad);
+        }
         if (hit && hit.dist <= hitDist) {
           if (
             pr.kind === 'pan' &&
@@ -1465,6 +1567,7 @@ export class GameRoom {
       now: this.now,
       nextEntityId: this.nextEntityId,
       hostId: this.ensureHostId(),
+      managerId: this.ensureManagerId(),
       mode: this.mode,
       matchState: this.matchState,
       matchTimeLeft: r2(this.matchTimeLeft),
@@ -1493,6 +1596,7 @@ export class GameRoom {
     this.now = Number(cp.now) || Date.now();
     this.nextEntityId = Number(cp.nextEntityId) || 1;
     this.hostId = cp.hostId || null;
+    this.managerId = cp.managerId || cp.hostId || null;
     this.mode = cp.mode || GAME_MODES.FFA;
     this.matchState = cp.matchState || 'playing';
     this.matchTimeLeft = typeof cp.matchTimeLeft === 'number' ? cp.matchTimeLeft : MATCH_DURATION_SEC;
@@ -1633,6 +1737,7 @@ export class GameRoom {
     }
     this.history = [{ t: this.now, positions: posMap }];
     this.ensureHostId();
+    this.ensureManagerId();
     return true;
   }
 
@@ -1692,6 +1797,7 @@ export class GameRoom {
       t: MSG.SNAPSHOT,
       st: this.now,
       hi: this.ensureHostId(),
+      mi: this.ensureManagerId(),
       md: this.mode,
       ms: this.matchState,
       mt: Math.ceil(this.matchTimeLeft),
