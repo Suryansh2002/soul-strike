@@ -35,13 +35,13 @@ export class BrowserHostEngine {
     return ws;
   }
 
-  _startInProcess({ checkpoint = null, initialBots = 2 } = {}) {
+  _startInProcess({ checkpoint = null, initialBots = 0 } = {}) {
     this.stop();
     this.room = new GameRoom();
     if (checkpoint) {
       this.room.importCheckpoint(checkpoint, (id) => this._getOrCreateVirtualWs(id));
     } else {
-      const botCount = typeof initialBots === 'number' ? initialBots : 2;
+      const botCount = typeof initialBots === 'number' ? initialBots : 0;
       for (let i = 0; i < botCount; i++) {
         this.room.addBot();
       }
@@ -58,7 +58,7 @@ export class BrowserHostEngine {
     }, 1000);
   }
 
-  start({ checkpoint = null, initialBots = 2 } = {}) {
+  start({ checkpoint = null, initialBots = 0 } = {}) {
     this.stop();
 
     if (!this.forceInProcess && typeof Worker !== 'undefined') {

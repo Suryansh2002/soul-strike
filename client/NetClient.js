@@ -355,7 +355,7 @@ export class NetClient {
     };
 
     this.hostEngine = engine;
-    engine.start({ checkpoint, initialBots: checkpoint ? 0 : 2 });
+    engine.start({ checkpoint, initialBots: 0 });
 
     if (!this.knownPeers.has(this.playerId)) {
       this.knownPeers.set(this.playerId, {

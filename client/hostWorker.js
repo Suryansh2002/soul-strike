@@ -43,7 +43,7 @@ self.onmessage = (event) => {
     if (msg.checkpoint) {
       room.importCheckpoint(msg.checkpoint, (id) => getOrCreateVirtualWs(id));
     } else {
-      const botCount = typeof msg.initialBots === 'number' ? msg.initialBots : 2;
+      const botCount = typeof msg.initialBots === 'number' ? msg.initialBots : 0;
       for (let i = 0; i < botCount; i++) {
         room.addBot();
       }
