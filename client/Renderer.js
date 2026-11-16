@@ -497,6 +497,8 @@ export class Renderer {
     for (const b of ARENA_BOXES) {
       // Braziers and sky-bridge fences have dedicated multi-part sculpted meshes that match these colliders.
       if (b.kind === 'brazier' || b.kind === 'fence') continue;
+      // The Central Sun Obelisk has a dedicated sculpted marble + gold mesh (see buildCentralObelisk).
+      if (b.id === 'altar_obelisk') continue;
       const geo = new THREE.BoxGeometry(b.w, b.h, b.d);
       this.scaleBoxUVs(geo, b.w, b.h, b.d, tileSizes[b.kind] || 3.4);
       const mesh = new THREE.Mesh(geo, materials[b.kind] || materials.cobble);
@@ -562,25 +564,8 @@ export class Renderer {
     meadow.receiveShadow = true;
     this.scene.add(meadow);
 
-    // Golden Sun Crystal & Multi-Ring Astrolabe atop Central Sun Obelisk
-    const crystalMat = new THREE.MeshStandardMaterial({
-      color: '#fde047',
-      emissive: '#f59e0b',
-      emissiveIntensity: 1.1,
-      roughness: 0.12,
-      metalness: 0.82,
-    });
-    this.obeliskCrystal = new THREE.Mesh(new THREE.OctahedronGeometry(1.2, 0), crystalMat);
-    this.obeliskCrystal.position.set(0, 8.2, 0);
-    this.scene.add(this.obeliskCrystal);
-
-    const astrolabeMat = new THREE.MeshStandardMaterial({ color: '#facc15', metalness: 0.88, roughness: 0.18 });
-    const ring1 = new THREE.Mesh(new THREE.TorusGeometry(1.65, 0.08, 8, 32), astrolabeMat);
-    ring1.position.set(0, 8.2, 0);
-    const ring2 = new THREE.Mesh(new THREE.TorusGeometry(2.0, 0.06, 8, 32), astrolabeMat);
-    ring2.position.set(0, 8.2, 0);
-    this.scene.add(ring1, ring2);
-    this.obeliskRings.push(ring1, ring2);
+    // Sculpted marble + gold Central Sun Obelisk, floating Sun Crystal and gimbal astrolabe
+    this.buildCentralObelisk();
 
     // Bouncy Arcane Trampoline Jump Pads
     for (const jp of JUMP_PADS) {
@@ -683,6 +668,567 @@ export class Renderer {
 
     this.panPickupGroup.add(panRing, this.panPickupPulse, panBeacon, this.panPickupRotator);
     this.scene.add(this.panPickupGroup);
+  }
+
+  makeCanvasTexture(w, h, drawFn, srgb = true) {
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    drawFn(c.getContext('2d'), w, h);
+    const tex = new THREE.CanvasTexture(c);
+    tex.anisotropy = this.maxAnisotropy;
+    if (srgb) tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
+  }
+
+  /**
+   * Central Sun Obelisk (visual only — the server collider stays the 1.8 x 5.0 x 1.8 `altar_obelisk` box,
+   * x/z ∈ [-0.9, 0.9], y ∈ [2.0, 7.0]). Everything that rotates lives inside a sphere centred on the crystal
+   * whose radius is smaller than the gap to the pyramidion tip, so the rings can never sweep into the pillar.
+   */
+  buildCentralObelisk() {
+    const hiRes = !this.isMobile;
+    const SHAFT_BOTTOM = 2.59;
+    const SHAFT_TOP = 6.25;
+    const HW_BOTTOM = 0.9;
+    const HW_TOP = 0.76;
+    const CRYSTAL_Y = 9.0;
+    this.obeliskCrystalY = CRYSTAL_Y;
+    const hwAt = (y) => HW_BOTTOM - ((y - SHAFT_BOTTOM) / (SHAFT_TOP - SHAFT_BOTTOM)) * (HW_BOTTOM - HW_TOP);
+    const SQRT2 = Math.SQRT2;
+
+    // Deterministic RNG so the colour map and glow map share identical rune shapes
+    const seeded = (seed) => () => {
+      seed = (seed * 16807) % 2147483647;
+      return (seed - 1) / 2147483646;
+    };
+
+    const drawSun = (ctx, cx, cy, r, fill, stroke, lw) => {
+      ctx.save();
+      ctx.fillStyle = fill;
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = lw;
+      ctx.beginPath();
+      for (let i = 0; i < 16; i++) {
+        const a = (i / 16) * Math.PI * 2;
+        const len = i % 2 === 0 ? r * 1.75 : r * 1.38;
+        const half = (Math.PI / 16) * 0.55;
+        ctx.moveTo(cx + Math.cos(a - half) * r * 1.05, cy + Math.sin(a - half) * r * 1.05);
+        ctx.lineTo(cx + Math.cos(a) * len, cy + Math.sin(a) * len);
+        ctx.lineTo(cx + Math.cos(a + half) * r * 1.05, cy + Math.sin(a + half) * r * 1.05);
+      }
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(cx, cy, r * 0.62, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    };
+
+    const drawRuneColumn = (ctx, w, h, strokeStyle, lw) => {
+      const rnd = seeded(7331);
+      const pts = [
+        [-1, -1], [0, -1], [1, -1],
+        [-1, 0], [0, 0], [1, 0],
+        [-1, 1], [0, 1], [1, 1],
+      ];
+      ctx.save();
+      ctx.strokeStyle = strokeStyle;
+      ctx.lineWidth = lw;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      const count = 7;
+      for (let i = 0; i < count; i++) {
+        const cx = w / 2;
+        const cy = h * (0.385 + i * 0.083);
+        const gx = w * 0.12;
+        const gy = h * 0.026;
+        ctx.beginPath();
+        // central stem keeps every glyph reading as part of one carved script
+        ctx.moveTo(cx, cy - gy);
+        ctx.lineTo(cx, cy + gy);
+        const strokes = 2 + Math.floor(rnd() * 3);
+        for (let s = 0; s < strokes; s++) {
+          const a = pts[Math.floor(rnd() * pts.length)];
+          const b = pts[Math.floor(rnd() * pts.length)];
+          if (a === b) continue;
+          ctx.moveTo(cx + a[0] * gx, cy + a[1] * gy);
+          ctx.lineTo(cx + b[0] * gx, cy + b[1] * gy);
+        }
+        ctx.stroke();
+        if (rnd() > 0.55) {
+          ctx.beginPath();
+          ctx.arc(cx + (rnd() > 0.5 ? gx : -gx) * 0.7, cy, gy * 0.32, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        // little diamond separators between glyphs
+        if (i < count - 1) {
+          const dy = cy + h * 0.0415;
+          ctx.beginPath();
+          ctx.moveTo(cx, dy - gy * 0.22);
+          ctx.lineTo(cx + gx * 0.18, dy);
+          ctx.lineTo(cx, dy + gy * 0.22);
+          ctx.lineTo(cx - gx * 0.18, dy);
+          ctx.closePath();
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
+    };
+
+    const FW = hiRes ? 512 : 256;
+    const FH = FW * 2.5;
+    const k = FW / 256;
+
+    // Polished ivory marble face with gold inset panel, engraved sun crest and rune column
+    const faceMap = this.makeCanvasTexture(FW, FH, (ctx, w, h) => {
+      const g = ctx.createLinearGradient(0, 0, 0, h);
+      g.addColorStop(0, '#fffaf0');
+      g.addColorStop(0.55, '#f4ecdb');
+      g.addColorStop(1, '#e6dac0');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, w, h);
+
+      const rnd = seeded(4242);
+      for (let i = 0; i < 26; i++) {
+        ctx.strokeStyle = i % 3 === 0 ? 'rgba(156, 132, 98, 0.22)' : 'rgba(170, 160, 140, 0.14)';
+        ctx.lineWidth = (0.6 + rnd() * 1.8) * k;
+        ctx.beginPath();
+        let x = rnd() * w;
+        let y = rnd() * h;
+        ctx.moveTo(x, y);
+        for (let s = 0; s < 4; s++) {
+          const nx = x + (rnd() - 0.5) * w * 0.8;
+          const ny = y + (rnd() - 0.2) * h * 0.18;
+          ctx.quadraticCurveTo((x + nx) / 2 + (rnd() - 0.5) * 40 * k, (y + ny) / 2, nx, ny);
+          x = nx;
+          y = ny;
+        }
+        ctx.stroke();
+      }
+
+      // recessed panel
+      const inset = w * 0.1;
+      ctx.fillStyle = 'rgba(120, 90, 40, 0.06)';
+      ctx.fillRect(inset, inset * 1.4, w - inset * 2, h - inset * 2.8);
+      ctx.strokeStyle = '#b8860b';
+      ctx.lineWidth = 7 * k;
+      ctx.strokeRect(inset, inset * 1.4, w - inset * 2, h - inset * 2.8);
+      ctx.strokeStyle = '#f7d774';
+      ctx.lineWidth = 2 * k;
+      ctx.strokeRect(inset + 9 * k, inset * 1.4 + 9 * k, w - inset * 2 - 18 * k, h - inset * 2.8 - 18 * k);
+
+      drawSun(ctx, w / 2, h * 0.165, w * 0.13, '#d4a52a', '#8a5a12', 3 * k);
+      // engraved runes: dark groove + light bevel highlight
+      drawRuneColumn(ctx, w, h, '#8a5a12', 7 * k);
+      ctx.save();
+      ctx.translate(-1.5 * k, -1.5 * k);
+      drawRuneColumn(ctx, w, h, 'rgba(255, 236, 170, 0.75)', 2.2 * k);
+      ctx.restore();
+    });
+    faceMap.wrapS = THREE.RepeatWrapping;
+    faceMap.repeat.set(4, 1);
+
+    // Glow map: only the sun crest, runes and inner panel line emit light
+    const faceGlow = this.makeCanvasTexture(FW, FH, (ctx, w, h) => {
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(0, 0, w, h);
+      ctx.shadowColor = '#ffb020';
+      ctx.shadowBlur = 14 * k;
+      const inset = w * 0.1;
+      ctx.strokeStyle = 'rgba(255, 190, 80, 0.55)';
+      ctx.lineWidth = 2 * k;
+      ctx.strokeRect(inset + 9 * k, inset * 1.4 + 9 * k, w - inset * 2 - 18 * k, h - inset * 2.8 - 18 * k);
+      drawSun(ctx, w / 2, h * 0.165, w * 0.13, '#ffd27a', '#fff3c4', 3 * k);
+      drawRuneColumn(ctx, w, h, '#ffe2a0', 6 * k);
+    });
+    faceGlow.wrapS = THREE.RepeatWrapping;
+    faceGlow.repeat.set(4, 1);
+
+    const marbleMat = new THREE.MeshPhysicalMaterial({
+      color: '#f1eadb',
+      roughness: 0.32,
+      metalness: 0.04,
+      clearcoat: 0.55,
+      clearcoatRoughness: 0.18,
+    });
+    const lapisMat = new THREE.MeshPhysicalMaterial({
+      color: '#1e3a6b',
+      roughness: 0.28,
+      metalness: 0.25,
+      clearcoat: 0.8,
+      clearcoatRoughness: 0.12,
+    });
+    const goldMat = new THREE.MeshStandardMaterial({
+      color: '#f5c542',
+      metalness: 1.0,
+      roughness: 0.2,
+      emissive: '#7c4a03',
+      emissiveIntensity: 0.18,
+    });
+    const glowStripMat = new THREE.MeshBasicMaterial({ color: '#ffcf6b' });
+    this.obeliskShaftMat = new THREE.MeshPhysicalMaterial({
+      map: faceMap,
+      emissiveMap: faceGlow,
+      emissive: '#ffb347',
+      emissiveIntensity: 0.9,
+      roughness: 0.3,
+      metalness: 0.05,
+      clearcoat: 0.6,
+      clearcoatRoughness: 0.15,
+    });
+
+    const obelisk = new THREE.Group();
+    const addMesh = (geo, mat, x, y, z, shadow = true) => {
+      const m = new THREE.Mesh(geo, mat);
+      m.position.set(x, y, z);
+      m.castShadow = shadow;
+      m.receiveShadow = true;
+      obelisk.add(m);
+      return m;
+    };
+    // Square frustum aligned to the world axes (4-sided cylinder rotated 45°)
+    const squareFrustum = (hwTop, hwBottom, height, segs = 1, open = false) => {
+      const geo = new THREE.CylinderGeometry(hwTop * SQRT2, hwBottom * SQRT2, height, 4, segs, open);
+      geo.rotateY(Math.PI / 4);
+      return geo;
+    };
+
+    // Inlaid sun-dial mosaic on the plaza floor around the plinth
+    const dialTex = this.makeTexture2D(hiRes ? 1024 : 512, (ctx, s) => {
+      const c = s / 2;
+      const R = s / 2;
+      const g = ctx.createRadialGradient(c, c, R * 0.2, c, c, R);
+      g.addColorStop(0, '#fbf6e9');
+      g.addColorStop(1, '#e9ddbf');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, s, s);
+      for (let i = 0; i < 16; i++) {
+        const a = (i / 16) * Math.PI * 2;
+        const long = i % 2 === 0;
+        const len = long ? R * 0.86 : R * 0.66;
+        const half = long ? 0.11 : 0.07;
+        ctx.fillStyle = long ? '#e2b13c' : '#c9b48a';
+        ctx.beginPath();
+        ctx.moveTo(c + Math.cos(a - half) * R * 0.34, c + Math.sin(a - half) * R * 0.34);
+        ctx.lineTo(c + Math.cos(a) * len, c + Math.sin(a) * len);
+        ctx.lineTo(c + Math.cos(a + half) * R * 0.34, c + Math.sin(a + half) * R * 0.34);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.lineWidth = R * 0.07;
+      ctx.strokeStyle = '#1e3a6b';
+      ctx.beginPath();
+      ctx.arc(c, c, R * 0.935, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.strokeStyle = '#d4a52a';
+      ctx.lineWidth = R * 0.012;
+      for (const rr of [0.895, 0.975, 0.34]) {
+        ctx.beginPath();
+        ctx.arc(c, c, R * rr, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.lineWidth = R * 0.01;
+      for (let i = 0; i < 48; i++) {
+        const a = (i / 48) * Math.PI * 2;
+        const r0 = i % 4 === 0 ? R * 0.905 : R * 0.925;
+        ctx.beginPath();
+        ctx.moveTo(c + Math.cos(a) * r0, c + Math.sin(a) * r0);
+        ctx.lineTo(c + Math.cos(a) * R * 0.965, c + Math.sin(a) * R * 0.965);
+        ctx.stroke();
+      }
+    });
+    const dial = new THREE.Mesh(
+      new THREE.CircleGeometry(3.5, 72),
+      new THREE.MeshStandardMaterial({
+        map: dialTex,
+        roughness: 0.38,
+        metalness: 0.12,
+        polygonOffset: true,
+        polygonOffsetFactor: -2,
+        polygonOffsetUnits: -2,
+      })
+    );
+    dial.rotation.x = -Math.PI / 2;
+    dial.position.set(0, 2.004, 0);
+    dial.receiveShadow = true;
+    obelisk.add(dial);
+
+    // Slowly turning glowing rune circle on the dial
+    const runeRingTex = this.makeTexture2D(hiRes ? 1024 : 512, (ctx, s) => {
+      const c = s / 2;
+      ctx.clearRect(0, 0, s, s);
+      ctx.strokeStyle = '#ffd27a';
+      ctx.shadowColor = '#ff9f1c';
+      ctx.shadowBlur = s * 0.012;
+      ctx.lineWidth = s * 0.006;
+      for (const rr of [0.76, 0.97]) {
+        ctx.beginPath();
+        ctx.arc(c, c, c * rr, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      const rnd = seeded(9001);
+      ctx.lineWidth = s * 0.007;
+      ctx.lineCap = 'round';
+      const n = 28;
+      for (let i = 0; i < n; i++) {
+        const a = (i / n) * Math.PI * 2;
+        ctx.save();
+        ctx.translate(c + Math.cos(a) * c * 0.865, c + Math.sin(a) * c * 0.865);
+        ctx.rotate(a + Math.PI / 2);
+        const gw = s * 0.018;
+        const gh = s * 0.03;
+        ctx.beginPath();
+        ctx.moveTo(0, -gh);
+        ctx.lineTo(0, gh);
+        for (let st = 0; st < 2 + Math.floor(rnd() * 2); st++) {
+          ctx.moveTo((rnd() - 0.5) * 2 * gw, (rnd() - 0.5) * 2 * gh);
+          ctx.lineTo((rnd() - 0.5) * 2 * gw, (rnd() - 0.5) * 2 * gh);
+        }
+        ctx.stroke();
+        ctx.restore();
+      }
+    });
+    this.obeliskRuneDisc = new THREE.Mesh(
+      new THREE.RingGeometry(1.9, 2.62, 96),
+      new THREE.MeshBasicMaterial({
+        map: runeRingTex,
+        transparent: true,
+        opacity: 0.95,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    );
+    this.obeliskRuneDisc.rotation.x = -Math.PI / 2;
+    this.obeliskRuneDisc.position.set(0, 2.014, 0);
+    this.obeliskRuneDisc.renderOrder = 2;
+    obelisk.add(this.obeliskRuneDisc);
+
+    // Stepped plinth: marble footing -> gold lip -> lapis drum with glowing inlays -> gold collar
+    addMesh(new THREE.BoxGeometry(2.5, 0.2, 2.5), marbleMat, 0, 2.1, 0);
+    addMesh(new THREE.BoxGeometry(2.3, 0.05, 2.3), goldMat, 0, 2.225, 0, false);
+    addMesh(new THREE.BoxGeometry(2.1, 0.28, 2.1), lapisMat, 0, 2.39, 0);
+    for (const [sx, sz, rotY] of [[0, -1.052, 0], [0, 1.052, 0], [-1.052, 0, Math.PI / 2], [1.052, 0, Math.PI / 2]]) {
+      const strip = addMesh(new THREE.BoxGeometry(1.5, 0.035, 0.012), glowStripMat, sx, 2.39, sz, false);
+      strip.rotation.y = rotY;
+      for (const off of [-0.86, 0.86]) {
+        const stud = addMesh(new THREE.OctahedronGeometry(0.055, 0), goldMat, 0, 2.39, 0, false);
+        const ox = rotY ? 0 : off;
+        const oz = rotY ? off : 0;
+        stud.position.set(sx + ox, 2.39, sz + oz);
+      }
+    }
+    addMesh(new THREE.BoxGeometry(1.98, 0.06, 1.98), goldMat, 0, 2.56, 0, false);
+
+    // Tapered marble shaft carrying the glowing rune faces
+    addMesh(
+      squareFrustum(HW_TOP, HW_BOTTOM, SHAFT_TOP - SHAFT_BOTTOM, 10, true),
+      this.obeliskShaftMat,
+      0,
+      (SHAFT_TOP + SHAFT_BOTTOM) / 2,
+      0
+    );
+
+    // Gold corner mouldings running up every edge
+    const up = new THREE.Vector3(0, 1, 0);
+    for (const [cx, cz] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+      const a = new THREE.Vector3(cx * (HW_BOTTOM + 0.01), SHAFT_BOTTOM, cz * (HW_BOTTOM + 0.01));
+      const b = new THREE.Vector3(cx * (HW_TOP + 0.01), SHAFT_TOP, cz * (HW_TOP + 0.01));
+      const len = a.distanceTo(b);
+      const edge = addMesh(new THREE.CylinderGeometry(0.038, 0.045, len, 8), goldMat, 0, 0, 0, false);
+      edge.position.copy(a).add(b).multiplyScalar(0.5);
+      edge.quaternion.setFromUnitVectors(up, b.clone().sub(a).normalize());
+    }
+
+    // Gold band separating the sun crest from the rune column
+    const bandY = 5.12;
+    addMesh(squareFrustum(hwAt(bandY + 0.04) + 0.03, hwAt(bandY - 0.04) + 0.03, 0.08), goldMat, 0, bandY, 0, false);
+
+    // Capital collar + gleaming gold pyramidion (tip exactly at the collider top y = 7.0)
+    addMesh(squareFrustum(0.84, 0.8, 0.14), goldMat, 0, 6.32, 0);
+    const pyramidion = addMesh(new THREE.ConeGeometry(0.8 * SQRT2, 0.61, 4), goldMat, 0, 6.695, 0);
+    pyramidion.rotation.y = Math.PI / 4;
+
+    // Soft energy beam rising from the tip into the crystal
+    this.obeliskBeam = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.05, 0.16, 1.1, 16, 1, true),
+      new THREE.MeshBasicMaterial({
+        color: '#ffcf6b',
+        transparent: true,
+        opacity: 0.42,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      })
+    );
+    this.obeliskBeam.position.set(0, 7.55, 0);
+    obelisk.add(this.obeliskBeam);
+
+    this.scene.add(obelisk);
+
+    // ---- Floating Sun Crystal (faceted glass shell around a white-hot core) ----
+    const crystalGroup = new THREE.Group();
+    crystalGroup.position.set(0, CRYSTAL_Y, 0);
+    const shell = new THREE.Mesh(
+      new THREE.OctahedronGeometry(0.58, 0),
+      new THREE.MeshPhysicalMaterial({
+        color: '#ffe7a3',
+        emissive: '#f59e0b',
+        emissiveIntensity: 0.75,
+        roughness: 0.06,
+        metalness: 0.05,
+        clearcoat: 1,
+        clearcoatRoughness: 0.04,
+        flatShading: true,
+        transparent: true,
+        opacity: 0.8,
+      })
+    );
+    shell.scale.set(1, 1.65, 1);
+    const core = new THREE.Mesh(
+      new THREE.OctahedronGeometry(0.26, 0),
+      new THREE.MeshBasicMaterial({ color: '#fff6d5' })
+    );
+    core.scale.set(1, 1.6, 1);
+    crystalGroup.add(core, shell);
+    this.obeliskCrystal = crystalGroup;
+    this.obeliskCrystalCore = core;
+    this.scene.add(crystalGroup);
+
+    // Tiny satellite shards orbiting inside the innermost ring
+    this.obeliskShards = new THREE.Group();
+    this.obeliskShards.position.set(0, CRYSTAL_Y, 0);
+    const shardMat = new THREE.MeshStandardMaterial({
+      color: '#fde68a',
+      emissive: '#f59e0b',
+      emissiveIntensity: 0.9,
+      metalness: 0.3,
+      roughness: 0.15,
+      flatShading: true,
+    });
+    for (let i = 0; i < 4; i++) {
+      const a = (i / 4) * Math.PI * 2;
+      const shard = new THREE.Mesh(new THREE.OctahedronGeometry(0.1, 0), shardMat);
+      shard.scale.set(1, 1.7, 1);
+      shard.position.set(Math.cos(a) * 0.84, (i % 2 ? 0.08 : -0.08), Math.sin(a) * 0.84);
+      this.obeliskShards.add(shard);
+    }
+    this.scene.add(this.obeliskShards);
+
+    // Additive halo glow around the crystal
+    const haloTex = this.makeTexture2D(128, (ctx, s) => {
+      const g = ctx.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+      g.addColorStop(0, 'rgba(255, 248, 220, 0.95)');
+      g.addColorStop(0.22, 'rgba(255, 210, 110, 0.55)');
+      g.addColorStop(0.55, 'rgba(255, 170, 60, 0.16)');
+      g.addColorStop(1, 'rgba(255, 150, 40, 0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, s, s);
+    });
+    this.obeliskHalo = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: haloTex,
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        opacity: 0.6,
+      })
+    );
+    this.obeliskHalo.position.set(0, CRYSTAL_Y, 0);
+    this.obeliskHalo.scale.set(4.2, 4.2, 1);
+    this.scene.add(this.obeliskHalo);
+
+    this.obeliskLight = new THREE.PointLight('#ffc861', 14, 18, 2);
+    this.obeliskLight.position.set(0, CRYSTAL_Y, 0);
+    this.scene.add(this.obeliskLight);
+
+    // ---- Nested gimbal astrolabe, all rings concentric on the crystal ----
+    // Max swept radius = 1.72 + 0.095 (ticks) ≈ 1.82 < CRYSTAL_Y - 7.0 (= 2.0), so rings stay clear of the pillar.
+    const ringMat = new THREE.MeshStandardMaterial({
+      color: '#f8c948',
+      metalness: 1.0,
+      roughness: 0.18,
+      emissive: '#7c4a03',
+      emissiveIntensity: 0.22,
+    });
+    const planetMat = (c) => new THREE.MeshBasicMaterial({ color: c });
+    const astro = new THREE.Group();
+    astro.position.set(0, CRYSTAL_Y, 0);
+    astro.rotation.z = 0.22;
+
+    const outerPivot = new THREE.Group();
+    const outerRing = new THREE.Mesh(new THREE.TorusGeometry(1.72, 0.05, 12, 128), ringMat);
+    outerPivot.add(outerRing);
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2;
+      const tick = new THREE.Mesh(new THREE.BoxGeometry(0.03, i % 3 === 0 ? 0.13 : 0.08, 0.05), ringMat);
+      const r = 1.72 + (i % 3 === 0 ? 0.03 : 0.01);
+      tick.position.set(Math.cos(a) * r, Math.sin(a) * r, 0);
+      tick.rotation.z = a - Math.PI / 2;
+      outerPivot.add(tick);
+    }
+    const p1 = new THREE.Mesh(new THREE.SphereGeometry(0.085, 16, 12), planetMat('#67e8f9'));
+    p1.position.set(1.72, 0, 0);
+    const p2 = new THREE.Mesh(new THREE.SphereGeometry(0.07, 16, 12), planetMat('#fb7185'));
+    p2.position.set(-1.72, 0, 0);
+    outerPivot.add(p1, p2);
+
+    const middlePivot = new THREE.Group();
+    const middleRing = new THREE.Mesh(new THREE.TorusGeometry(1.42, 0.04, 10, 112), ringMat);
+    middleRing.rotation.x = Math.PI / 2;
+    const p3 = new THREE.Mesh(new THREE.SphereGeometry(0.075, 16, 12), planetMat('#fde047'));
+    p3.position.set(0, 0, 1.42);
+    middlePivot.add(middleRing, p3);
+
+    const innerPivot = new THREE.Group();
+    const innerRing = new THREE.Mesh(new THREE.TorusGeometry(1.14, 0.035, 10, 96), ringMat);
+    innerRing.rotation.y = Math.PI / 2;
+    const p4 = new THREE.Mesh(new THREE.SphereGeometry(0.06, 16, 12), planetMat('#c4b5fd'));
+    p4.position.set(0, 1.14, 0);
+    innerPivot.add(innerRing, p4);
+
+    middlePivot.add(innerPivot);
+    outerPivot.add(middlePivot);
+    astro.add(outerPivot);
+    this.scene.add(astro);
+    this.obeliskRings = [outerPivot, middlePivot, innerPivot];
+
+    // Sun motes spiralling lazily up around the shaft
+    this.obeliskMotes = [];
+    const moteGeo = new THREE.SphereGeometry(0.045, 8, 6);
+    const moteMat = new THREE.MeshBasicMaterial({
+      color: '#ffe08a',
+      transparent: true,
+      opacity: 0.9,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const moteCount = this.isMobile ? 10 : 16;
+    for (let i = 0; i < moteCount; i++) {
+      const mote = new THREE.Mesh(moteGeo, moteMat);
+      mote.userData = {
+        angle: (i / moteCount) * Math.PI * 2,
+        radius: 1.45 + (i % 3) * 0.18,
+        speed: 0.35 + (i % 4) * 0.08,
+        phase: i / moteCount,
+      };
+      this.scene.add(mote);
+      this.obeliskMotes.push(mote);
+    }
+  }
+
+  makeTexture2D(size, drawFn) {
+    const c = document.createElement('canvas');
+    c.width = size;
+    c.height = size;
+    drawFn(c.getContext('2d'), size);
+    const tex = new THREE.CanvasTexture(c);
+    tex.anisotropy = this.maxAnisotropy;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
   }
 
   buildFunProps() {
@@ -1554,6 +2100,11 @@ export class Renderer {
     const team = p.tm ?? p.team ?? 0;
     const color = this.getTeamColor(team, p.id, mode);
 
+    let seedHash = 0;
+    const rawId = String(p.id || 'player');
+    for (let i = 0; i < rawId.length; i++) seedHash = (seedHash * 31 + rawId.charCodeAt(i)) | 0;
+    const animSeed = (Math.abs(seedHash) % 628) * 0.01;
+
     const armorMat = new THREE.MeshStandardMaterial({ color: '#334155', roughness: 0.38, metalness: 0.72 });
     const steelMat = new THREE.MeshStandardMaterial({ color: '#cbd5e1', roughness: 0.26, metalness: 0.85 });
     const clothMat = new THREE.MeshStandardMaterial({ color: '#f8fafc', roughness: 0.72 });
@@ -1565,72 +2116,173 @@ export class Renderer {
       roughness: 0.3,
       metalness: 0.48,
     });
+    const darkVisorMat = new THREE.MeshStandardMaterial({ color: '#090d16', roughness: 0.15, metalness: 0.85 });
+    const eyeGlowMat = new THREE.MeshBasicMaterial({ color: '#fef08a' });
+    const potionMat = new THREE.MeshStandardMaterial({
+      color: '#38bdf8',
+      emissive: '#0ea5e9',
+      emissiveIntensity: 0.85,
+      roughness: 0.15,
+      transparent: true,
+      opacity: 0.88,
+    });
+    const leatherMat = new THREE.MeshStandardMaterial({ color: '#78350f', roughness: 0.65, metalness: 0.1 });
 
     // Articulated Hip + Knee Pivots (hip at y = 0.72, knee at -0.32, boot sole at y = 0)
-    const makeLegPivot = (xOffset) => {
+    const makeLegPivot = (xOffset, isRight) => {
       const hip = new THREE.Group();
       hip.position.set(xOffset, 0.72, 0);
       const thigh = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.32, 0.24), armorMat);
       thigh.position.y = -0.16;
       thigh.castShadow = true;
+      const thighTrim = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.22, 0.12), goldMat);
+      thighTrim.position.set(isRight ? 0.115 : -0.115, -0.15, 0);
 
       const kneePivot = new THREE.Group();
       kneePivot.position.set(0, -0.32, 0);
       const knee = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.12, 0.27), goldMat);
       knee.position.set(0, 0, -0.02);
+      const kneeWingL = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.11, 0.15), goldMat);
+      kneeWingL.position.set(-0.125, 0.01, -0.01);
+      kneeWingL.rotation.x = 0.25;
+      const kneeWingR = kneeWingL.clone();
+      kneeWingR.position.x = 0.125;
+
       const greave = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.3, 0.22), steelMat);
       greave.position.y = -0.17;
       greave.castShadow = true;
-      const boot = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.14, 0.32), armorMat);
-      boot.position.set(0, -0.33, -0.04);
-      kneePivot.add(knee, greave, boot);
+      const greaveGlow = new THREE.Mesh(new THREE.BoxGeometry(0.055, 0.22, 0.025), accentMat);
+      greaveGlow.position.set(0, -0.17, -0.11);
 
-      hip.add(thigh, kneePivot);
+      const bootCuff = new THREE.Mesh(new THREE.BoxGeometry(0.235, 0.055, 0.25), goldMat);
+      bootCuff.position.set(0, -0.27, 0);
+      const boot = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.14, 0.3), armorMat);
+      boot.position.set(0, -0.33, -0.03);
+      const bootToe = new THREE.Mesh(new THREE.CylinderGeometry(0.105, 0.12, 0.11, 8), steelMat);
+      bootToe.scale.set(1.0, 0.65, 1.15);
+      bootToe.position.set(0, -0.345, -0.14);
+      const bootSole = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.04, 0.36), darkVisorMat);
+      bootSole.position.set(0, -0.385, -0.05);
+      kneePivot.add(knee, kneeWingL, kneeWingR, greave, greaveGlow, bootCuff, boot, bootToe, bootSole);
+
+      hip.add(thigh, thighTrim, kneePivot);
       return { hip, kneePivot };
     };
-    const legL = makeLegPivot(-0.15);
-    const legR = makeLegPivot(0.15);
+    const legL = makeLegPivot(-0.15, false);
+    const legR = makeLegPivot(0.15, true);
     const hipL = legL.hip;
     const kneeL = legL.kneePivot;
     const hipR = legR.hip;
     const kneeR = legR.kneePivot;
 
-    // Isolated Pelvis Pivot at y = 0.72 (belt, tassets, and sculpted rear hip plate)
+    // Isolated Pelvis Pivot at y = 0.72 (belt, buckle, tassets, potion flask & hip pouch)
     const pelvisGroup = new THREE.Group();
     pelvisGroup.position.set(0, 0.72, 0);
     const belt = new THREE.Mesh(new THREE.BoxGeometry(0.66, 0.1, 0.42), goldMat);
     belt.position.y = 0.04;
+    const beltBuckle = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.14, 0.045), steelMat);
+    beltBuckle.position.set(0, 0.04, -0.22);
+    const beltGem = new THREE.Mesh(new THREE.OctahedronGeometry(0.055, 0), accentMat);
+    beltGem.position.set(0, 0.04, -0.245);
     const rearHip = new THREE.Mesh(new THREE.BoxGeometry(0.54, 0.22, 0.26), armorMat);
     rearHip.position.set(0, -0.01, 0.08);
     rearHip.castShadow = true;
 
-    // Waist tassets mounted clear of hip swing arc
-    const tassetL = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.24, 0.34), accentMat);
+    // Waist tassets with gold trim strips mounted clear of hip swing arc
+    const tassetL = new THREE.Group();
     tassetL.position.set(-0.35, 0, 0);
     tassetL.rotation.z = 0.28;
+    const tassetPlateL = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.24, 0.34), accentMat);
+    const tassetTrimL = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.045, 0.35), goldMat);
+    tassetTrimL.position.y = -0.11;
+    tassetL.add(tassetPlateL, tassetTrimL);
     const tassetR = tassetL.clone();
     tassetR.position.x = 0.35;
     tassetR.rotation.z = -0.28;
-    pelvisGroup.add(belt, rearHip, tassetL, tassetR);
+
+    // Fun Soul Potion Flask swinging on left hip
+    const potionGroup = new THREE.Group();
+    potionGroup.position.set(-0.33, -0.04, -0.12);
+    const flaskBulb = new THREE.Mesh(new THREE.SphereGeometry(0.068, 10, 10), potionMat);
+    flaskBulb.position.y = -0.06;
+    const flaskNeck = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.032, 0.045, 8), goldMat);
+    flaskNeck.position.y = 0.008;
+    const flaskCork = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.018, 0.03, 8), leatherMat);
+    flaskCork.position.y = 0.038;
+    potionGroup.add(flaskBulb, flaskNeck, flaskCork);
+
+    // Adventurer leather pouch on right hip
+    const hipPouch = new THREE.Group();
+    hipPouch.position.set(0.33, -0.04, 0.1);
+    const pouchBody = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.15, 0.16), leatherMat);
+    const pouchFlap = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.06, 0.17), leatherMat);
+    pouchFlap.position.y = 0.05;
+    const pouchStud = new THREE.Mesh(new THREE.OctahedronGeometry(0.028, 0), goldMat);
+    pouchStud.position.set(0.068, 0.02, 0);
+    hipPouch.add(pouchBody, pouchFlap, pouchStud);
+
+    pelvisGroup.add(belt, beltBuckle, beltGem, rearHip, tassetL, tassetR, potionGroup, hipPouch);
 
     // Articulated Upper Body Pivot at waist y = 0.72 (offsets shifted by -0.72)
     const upperBody = new THREE.Group();
     upperBody.position.set(0, 0.72, 0);
 
-    // Sculpted Torso, Breastplate & Backpack Crystal
+    // Sculpted Torso, Breastplate, Gorget, Spinning Arcane Core & Winged Thruster Backpack
     const torso = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.66, 0.38), armorMat);
     torso.position.y = 0.33;
     torso.castShadow = true;
     const chestPlate = new THREE.Mesh(new THREE.BoxGeometry(0.54, 0.42, 0.42), steelMat);
     chestPlate.position.y = 0.4;
+    const gorget = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.26, 0.1, 10), goldMat);
+    gorget.position.y = 0.66;
+    const chestTrimL = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.045, 0.03), goldMat);
+    chestTrimL.position.set(-0.13, 0.5, -0.215);
+    chestTrimL.rotation.z = -0.42;
+    const chestTrimR = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.045, 0.03), goldMat);
+    chestTrimR.position.set(0.13, 0.5, -0.215);
+    chestTrimR.rotation.z = 0.42;
+
     const chestCore = new THREE.Mesh(new THREE.OctahedronGeometry(0.13, 0), accentMat);
     chestCore.position.set(0, 0.41, -0.22);
+    const chestRing = new THREE.Mesh(new THREE.TorusGeometry(0.165, 0.018, 8, 24), goldMat);
+    chestRing.position.set(0, 0.41, -0.22);
 
-    // Backpack power crystal
+    // Backpack power crystal, orbiting gold ring, arcane mini-wings & jet thruster nozzles
     const pack = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.38, 0.14), armorMat);
     pack.position.set(0, 0.4, 0.24);
     const packCrystal = new THREE.Mesh(new THREE.OctahedronGeometry(0.12, 0), accentMat);
     packCrystal.position.set(0, 0.46, 0.34);
+    const packRing = new THREE.Mesh(new THREE.TorusGeometry(0.155, 0.016, 6, 20), goldMat);
+    packRing.position.set(0, 0.46, 0.34);
+
+    const makeWing = (side) => {
+      const wing = new THREE.Group();
+      wing.position.set(side * 0.16, 0.44, 0.28);
+      const strut = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.045, 0.035), goldMat);
+      strut.position.set(side * 0.15, 0.06, 0);
+      strut.rotation.z = side * 0.38;
+      const blade1 = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.09, 0.025), accentMat);
+      blade1.position.set(side * 0.26, 0.17, 0);
+      blade1.rotation.z = side * 0.56;
+      const blade2 = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.075, 0.025), accentMat);
+      blade2.position.set(side * 0.22, 0.03, 0);
+      blade2.rotation.z = side * 0.22;
+      wing.add(strut, blade1, blade2);
+      return wing;
+    };
+    const wingL = makeWing(-1);
+    const wingR = makeWing(1);
+
+    for (const side of [-1, 1]) {
+      const thruster = new THREE.Group();
+      thruster.position.set(side * 0.11, 0.18, 0.25);
+      thruster.rotation.set(0.45, 0, side * -0.15);
+      const nozzle = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.075, 0.12, 8), steelMat);
+      const nozzleCore = new THREE.Mesh(new THREE.SphereGeometry(0.046, 8, 6), eyeGlowMat);
+      nozzleCore.position.y = -0.055;
+      thruster.add(nozzle, nozzleCore);
+      upperBody.add(thruster);
+    }
 
     // Articulated Shoulder Pivots at local y = 0.6 (world y = 1.32)
     const makeArmPivot = (xOffset, isRight) => {
@@ -1640,14 +2292,23 @@ export class Renderer {
       pauldron.position.set(isRight ? 0.04 : -0.04, 0.04, 0);
       const pauldronTrim = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.06, 0.36), goldMat);
       pauldronTrim.position.set(isRight ? 0.04 : -0.04, -0.06, 0);
+      const pauldronCrest = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.08, 0.26), goldMat);
+      pauldronCrest.position.set(isRight ? 0.04 : -0.04, 0.18, 0);
+      const pauldronGem = new THREE.Mesh(new THREE.OctahedronGeometry(0.055, 0), accentMat);
+      pauldronGem.position.set(isRight ? 0.21 : -0.21, 0.04, 0);
+
       const upperArm = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.26, 0.18), clothMat);
       upperArm.position.y = -0.16;
       const vambrace = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.26, 0.2), steelMat);
       vambrace.position.y = -0.4;
       vambrace.castShadow = true;
+      const gauntletCuff = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.06, 0.22), goldMat);
+      gauntletCuff.position.y = -0.29;
       const hand = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.12, 0.16), armorMat);
       hand.position.y = -0.56;
-      shoulder.add(pauldron, pauldronTrim, upperArm, vambrace, hand);
+      const knucklePlate = new THREE.Mesh(new THREE.BoxGeometry(0.155, 0.06, 0.045), goldMat);
+      knucklePlate.position.set(0, -0.56, -0.08);
+      shoulder.add(pauldron, pauldronTrim, pauldronCrest, pauldronGem, upperArm, vambrace, gauntletCuff, hand, knucklePlate);
       return shoulder;
     };
     const shoulderL = makeArmPivot(-0.42, false);
@@ -1729,7 +2390,7 @@ export class Renderer {
 
     shoulderR.add(tpStaff, tpBlade, tpRail, tpPan);
 
-    // Sculpted Helmet Group: rounded shell, cheek guard, curved brow/visor, side horns, tapered crest
+    // Sculpted Helmet Group: shell, cheek guard, recessed dark visor, expressive blinking LED eyes, horns, plume & halo
     const headGroup = new THREE.Group();
     headGroup.position.set(0, 0.88, 0);
     const head = new THREE.Mesh(new THREE.SphereGeometry(0.245, 16, 14), armorMat);
@@ -1741,16 +2402,64 @@ export class Renderer {
       goldMat
     );
     brow.position.y = 0.065;
-    const visor = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.25, 0.25, 0.08, 14, 1, false, Math.PI * 0.74, Math.PI * 0.52),
-      accentMat
+    const visorGlass = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.248, 0.248, 0.095, 14, 1, false, Math.PI * 0.73, Math.PI * 0.54),
+      darkVisorMat
     );
-    visor.position.y = -0.005;
+    visorGlass.position.y = 0.0;
+    const chinGuard = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.236, 0.205, 0.048, 14, 1, false, Math.PI * 0.75, Math.PI * 0.5),
+      goldMat
+    );
+    chinGuard.position.y = -0.065;
+
+    const eyeL = new THREE.Mesh(new THREE.BoxGeometry(0.058, 0.032, 0.018), eyeGlowMat);
+    eyeL.position.set(-0.068, 0.005, -0.246);
+    eyeL.rotation.y = 0.24;
+    const eyeR = new THREE.Mesh(new THREE.BoxGeometry(0.058, 0.032, 0.018), eyeGlowMat);
+    eyeR.position.set(0.068, 0.005, -0.246);
+    eyeR.rotation.y = -0.24;
+    for (const side of [-1, 1]) {
+      const browFin = new THREE.Mesh(new THREE.BoxGeometry(0.072, 0.016, 0.024), goldMat);
+      browFin.position.set(side * 0.07, 0.034, -0.25);
+      browFin.rotation.set(0, side * -0.24, side * 0.22);
+      headGroup.add(browFin);
+    }
+
     const crestLower = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.16, 0.36), accentMat);
     crestLower.position.set(0, 0.22, 0.03);
     const crestTip = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.12, 0.24), accentMat);
     crestTip.position.set(0, 0.31, 0.09);
-    headGroup.add(head, cheekGuard, brow, visor, crestLower, crestTip);
+
+    // Flowing Multi-Segment Heroic Plume Tail
+    const plumeTail = new THREE.Group();
+    plumeTail.position.set(0, 0.26, 0.22);
+    const plume1 = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.085, 0.22), accentMat);
+    plume1.position.set(0, -0.02, 0.1);
+    plume1.rotation.x = -0.35;
+    const plume2 = new THREE.Mesh(new THREE.BoxGeometry(0.058, 0.075, 0.2), goldMat);
+    plume2.position.set(0, -0.1, 0.26);
+    plume2.rotation.x = -0.68;
+    const plume3 = new THREE.Mesh(new THREE.BoxGeometry(0.042, 0.06, 0.16), accentMat);
+    plume3.position.set(0, -0.2, 0.38);
+    plume3.rotation.x = -0.95;
+    plumeTail.add(plume1, plume2, plume3);
+
+    // Floating Golden Sun Halo
+    const haloRing = new THREE.Group();
+    haloRing.position.set(0, 0.42, 0);
+    haloRing.rotation.x = 0.18;
+    const haloTorus = new THREE.Mesh(new THREE.TorusGeometry(0.19, 0.018, 8, 24), goldMat);
+    haloTorus.rotation.x = Math.PI / 2;
+    haloRing.add(haloTorus);
+    for (let i = 0; i < 4; i++) {
+      const a = (i / 4) * Math.PI * 2;
+      const bead = new THREE.Mesh(new THREE.OctahedronGeometry(0.032, 0), accentMat);
+      bead.position.set(Math.cos(a) * 0.21, 0, Math.sin(a) * 0.21);
+      haloRing.add(bead);
+    }
+
+    headGroup.add(head, cheekGuard, brow, visorGlass, chinGuard, eyeL, eyeR, crestLower, crestTip, plumeTail, haloRing);
     for (const side of [-1, 1]) {
       const horn = new THREE.Mesh(new THREE.ConeGeometry(0.052, 0.24, 6), goldMat);
       horn.position.set(side * 0.23, 0.13, 0);
@@ -1759,7 +2468,7 @@ export class Renderer {
       headGroup.add(horn);
     }
 
-    // Cape suspended from a top-shoulder pivot behind the power crystal so billowing swings cleanly backward
+    // Embroidered Cape suspended from top-shoulder clasps behind the power crystal
     const cape = new THREE.Group();
     cape.position.set(0, 0.62, 0.31);
     const capeCloth = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.92, 0.045), accentMat);
@@ -1767,7 +2476,22 @@ export class Renderer {
     capeCloth.castShadow = true;
     const capeTrim = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.06, 0.055), goldMat);
     capeTrim.position.set(0, -0.9, 0.02);
-    cape.add(capeCloth, capeTrim);
+    const capeBorderL = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.88, 0.052), goldMat);
+    capeBorderL.position.set(-0.26, -0.46, 0.02);
+    const capeBorderR = capeBorderL.clone();
+    capeBorderR.position.x = 0.26;
+    const capeEmblem = new THREE.Mesh(new THREE.OctahedronGeometry(0.13, 0), goldMat);
+    capeEmblem.scale.set(1, 1.35, 0.22);
+    capeEmblem.position.set(0, -0.42, 0.046);
+    cape.add(capeCloth, capeTrim, capeBorderL, capeBorderR, capeEmblem);
+    for (const side of [-1, 1]) {
+      const clasp = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.055, 0.03, 10), goldMat);
+      clasp.rotation.x = Math.PI / 2;
+      clasp.position.set(side * 0.24, 0.0, 0.025);
+      const claspGem = new THREE.Mesh(new THREE.OctahedronGeometry(0.032, 0), accentMat);
+      claspGem.position.set(side * 0.24, 0.0, 0.042);
+      cape.add(clasp, claspGem);
+    }
     cape.rotation.x = -0.18;
 
     // Blocking Aegis Aura
@@ -1803,9 +2527,16 @@ export class Renderer {
     upperBody.add(
       torso,
       chestPlate,
+      gorget,
+      chestTrimL,
+      chestTrimR,
       chestCore,
+      chestRing,
       pack,
       packCrystal,
+      packRing,
+      wingL,
+      wingR,
       shoulderL,
       shoulderR,
       headGroup,
@@ -1835,6 +2566,18 @@ export class Renderer {
       shoulderR,
       headGroup,
       cape,
+      chestCore,
+      chestRing,
+      packCrystal,
+      packRing,
+      wingL,
+      wingR,
+      eyeL,
+      eyeR,
+      haloRing,
+      plumeTail,
+      potionGroup,
+      animSeed,
       tpStaff,
       tpBlade,
       tpRail,
@@ -1926,6 +2669,7 @@ export class Renderer {
   }
 
   applyLocomotionPose(rec, x, y, z, yaw, pitch, vx, vz, blocking, weaponId, timeSec) {
+    const seed = rec.animSeed || 0;
     rec.root.rotation.x = 0;
     rec.root.rotation.z = 0;
     rec.root.position.set(x, y, z);
@@ -1941,13 +2685,15 @@ export class Renderer {
     rec.hipR.rotation.z = 0;
     rec.pelvisGroup.position.set(0, 0.72, 0);
     rec.pelvisGroup.rotation.set(0, 0, 0);
-    rec.upperBody.position.set(0, 0.72, 0);
     rec.upperBody.rotation.set(0, 0, 0);
     rec.shoulderL.rotation.y = 0;
     rec.shoulderR.rotation.y = 0;
 
     const spd = Math.hypot(vx || 0, vz || 0);
     const stride = spd > 0.6 ? Math.sin(timeSec * 11 + x * 0.3) * Math.min(0.75, spd * 0.1) : 0;
+    const idleBob = spd <= 0.6 ? Math.sin(timeSec * 2.8 + seed) * 0.018 : Math.abs(stride) * 0.035;
+    rec.upperBody.position.set(0, 0.72 + idleBob, 0);
+
     rec.hipL.rotation.x = stride;
     rec.hipR.rotation.x = -stride;
     rec.kneeL.rotation.set(Math.min(0, stride * 0.55), 0, 0);
@@ -1966,6 +2712,35 @@ export class Renderer {
     rec.shoulderR.rotation.x =
       (showPan ? 0.32 : 0) + stride * 0.4 + Math.sin(rec.attackAnim * Math.PI) * (showPan ? 1.65 : 1.45);
     rec.cape.rotation.x = -0.18 - Math.min(0.48, spd * 0.05) - Math.sin(timeSec * 6) * 0.04;
+
+    if (rec.chestCore) rec.chestCore.rotation.y = timeSec * 2.2 + seed;
+    if (rec.chestRing) rec.chestRing.rotation.z = -timeSec * 1.6 + seed;
+    if (rec.packCrystal) rec.packCrystal.rotation.y = -timeSec * 2.6 + seed;
+    if (rec.packRing) rec.packRing.rotation.z = timeSec * 1.9 + seed;
+    if (rec.haloRing) {
+      rec.haloRing.position.y = 0.42 + Math.sin(timeSec * 3.4 + seed) * 0.025;
+      rec.haloRing.rotation.y = timeSec * 1.4 + seed;
+    }
+    if (rec.wingL && rec.wingR) {
+      const wingSweep = 0.32 + Math.min(0.35, spd * 0.04) + Math.sin(timeSec * 9 + seed) * 0.08;
+      const wingFlap = Math.sin(timeSec * 9 + seed) * 0.1;
+      rec.wingL.rotation.set(0, wingSweep, wingFlap);
+      rec.wingR.rotation.set(0, -wingSweep, -wingFlap);
+    }
+    if (rec.plumeTail) {
+      rec.plumeTail.rotation.x = -0.06 - Math.min(0.42, spd * 0.045) + Math.sin(timeSec * 7.5 + seed) * 0.08;
+    }
+    if (rec.potionGroup) {
+      rec.potionGroup.rotation.x = stride * 0.35 + Math.sin(timeSec * 4.5 + seed) * 0.05;
+      rec.potionGroup.rotation.z = 0.06 + Math.sin(timeSec * 3.2 + seed) * 0.05;
+    }
+    if (rec.eyeL && rec.eyeR) {
+      const isAttacking = (rec.attackAnim || 0) > 0.1 || (rec.panSwingAnim || 0) > 0.1;
+      const blink = isAttacking ? 0.42 : Math.sin(timeSec * 1.7 + seed) > 0.96 ? 0.12 : 1.0;
+      const sx = isAttacking ? 1.15 : 1.0;
+      rec.eyeL.scale.set(sx, blink, 1);
+      rec.eyeR.scale.set(sx, blink, 1);
+    }
 
     rec.tpStaff.visible = !showPan && (!weaponId || weaponId === 'staff');
     rec.tpBlade.visible = !showPan && weaponId === 'runeblade';
@@ -2046,6 +2821,7 @@ export class Renderer {
 
   applyEmotePose(rec, emoteId, elapsed, duration, x, y, z, yaw, weaponId) {
     const t = elapsed;
+    const seed = rec.animSeed || 0;
     const p = Math.min(1, elapsed / Math.max(0.01, duration));
     let extraY = 0;
     let rotX = 0;
@@ -2067,12 +2843,35 @@ export class Renderer {
     rec.shoulderR.rotation.set(0, 0, 0);
     rec.cape.rotation.x = -0.22;
 
+    if (rec.chestCore) rec.chestCore.rotation.y = t * 3.0 + seed;
+    if (rec.chestRing) rec.chestRing.rotation.z = -t * 2.4 + seed;
+    if (rec.packCrystal) rec.packCrystal.rotation.y = -t * 3.2 + seed;
+    if (rec.packRing) rec.packRing.rotation.z = t * 2.5 + seed;
+    if (rec.haloRing) {
+      rec.haloRing.position.y = 0.42 + Math.sin(t * 4.5 + seed) * 0.03;
+      rec.haloRing.rotation.y = t * 2.2 + seed;
+    }
+    if (rec.wingL && rec.wingR) {
+      rec.wingL.rotation.set(0, 0.35, 0);
+      rec.wingR.rotation.set(0, -0.35, 0);
+    }
+    if (rec.plumeTail) rec.plumeTail.rotation.set(-0.08, 0, 0);
+    if (rec.potionGroup) rec.potionGroup.rotation.set(0, 0, 0.06);
+    let eyeScaleY = Math.sin(t * 2.1 + seed) > 0.96 ? 0.12 : 1.0;
+
     if (emoteId === 'wave') {
       extraY = Math.abs(Math.sin(t * 6)) * 0.07;
       rec.shoulderR.rotation.z = 2.52 + Math.sin(t * 11) * 0.36;
       rec.shoulderR.rotation.x = 0.25;
       rec.shoulderL.rotation.z = -0.18;
       rec.headGroup.rotation.z = Math.sin(t * 5.5) * 0.14;
+      eyeScaleY = 0.45;
+      if (rec.wingL && rec.wingR) {
+        const w = 0.32 + Math.sin(t * 8) * 0.12;
+        rec.wingL.rotation.set(0, w, Math.sin(t * 8) * 0.1);
+        rec.wingR.rotation.set(0, -w, -Math.sin(t * 8) * 0.1);
+      }
+      if (rec.plumeTail) rec.plumeTail.rotation.z = Math.sin(t * 6) * 0.12;
     } else if (emoteId === 'dance') {
       const beat = t * 9.5;
       extraY = Math.abs(Math.sin(beat)) * 0.22;
@@ -2086,6 +2885,14 @@ export class Renderer {
       rec.shoulderR.rotation.x = -Math.cos(beat) * 0.5;
       rec.headGroup.rotation.z = -Math.sin(beat * 0.5) * 0.18;
       rec.cape.rotation.x = -0.45 - Math.abs(Math.sin(beat)) * 0.32;
+      eyeScaleY = 0.38;
+      if (rec.wingL && rec.wingR) {
+        const flap = Math.sin(beat * 2) * 0.28;
+        rec.wingL.rotation.set(0, 0.28, flap);
+        rec.wingR.rotation.set(0, -0.28, -flap);
+      }
+      if (rec.plumeTail) rec.plumeTail.rotation.x = -0.18 - Math.abs(Math.sin(beat)) * 0.25;
+      if (rec.potionGroup) rec.potionGroup.rotation.x = Math.sin(beat) * 0.25;
     } else if (emoteId === 'twerk') {
       // Grounded wide bent-knee squat with isolated pelvic snaps, hands on knees & over-shoulder lookback
       const drop = Math.min(1, t / 0.14);
@@ -2129,6 +2936,13 @@ export class Renderer {
         (0.35 + sway * 0.14) * drop
       );
       rec.cape.rotation.x = -0.22 - drop * (0.35 + pulse * 0.45);
+      eyeScaleY = 0.35;
+      if (rec.wingL && rec.wingR) {
+        rec.wingL.rotation.set(0, 0.25 + pulse * 0.38, pulse * 0.24);
+        rec.wingR.rotation.set(0, -0.25 - pulse * 0.38, -pulse * 0.24);
+      }
+      if (rec.plumeTail) rec.plumeTail.rotation.x = -0.25 - pulse * 0.35;
+      if (rec.potionGroup) rec.potionGroup.rotation.set(pulse * 0.35, 0, sway * 0.25);
     } else if (emoteId === 'cheer') {
       const hop = Math.abs(Math.sin(t * 7.5));
       extraY = hop * 0.42;
@@ -2139,12 +2953,25 @@ export class Renderer {
       rec.hipL.rotation.x = -hop * 0.35;
       rec.hipR.rotation.x = -hop * 0.35;
       rec.cape.rotation.x = -0.35 - hop * 0.3;
+      eyeScaleY = 0.35;
+      if (rec.wingL && rec.wingR) {
+        const wingFlap = Math.sin(t * 16) * 0.35;
+        rec.wingL.rotation.set(0, 0.22, wingFlap);
+        rec.wingR.rotation.set(0, -0.22, -wingFlap);
+      }
+      if (rec.plumeTail) rec.plumeTail.rotation.x = -0.2 - hop * 0.25;
     } else if (emoteId === 'spin') {
       rotY = yaw + p * Math.PI * 6;
       extraY = Math.sin(p * Math.PI) * 0.28;
       rec.shoulderL.rotation.z = -1.45;
       rec.shoulderR.rotation.z = 1.45;
       rec.cape.rotation.x = -0.82;
+      eyeScaleY = 0.65;
+      if (rec.wingL && rec.wingR) {
+        rec.wingL.rotation.set(0, 0.18, 0.14);
+        rec.wingR.rotation.set(0, -0.18, -0.14);
+      }
+      if (rec.plumeTail) rec.plumeTail.rotation.x = -0.55;
     } else if (emoteId === 'bow') {
       const hold = Math.min(1, Math.sin(p * Math.PI) * 1.45);
       rotX = -0.62 * hold;
@@ -2153,6 +2980,16 @@ export class Renderer {
       rec.shoulderL.rotation.z = 0.35 * hold;
       rec.shoulderR.rotation.x = -0.55 * hold;
       rec.shoulderR.rotation.z = 0.42 * hold;
+      eyeScaleY = 0.35;
+      if (rec.wingL && rec.wingR) {
+        rec.wingL.rotation.set(0, 0.55, 0);
+        rec.wingR.rotation.set(0, -0.55, 0);
+      }
+    }
+
+    if (rec.eyeL && rec.eyeR) {
+      rec.eyeL.scale.set(1, eyeScaleY, 1);
+      rec.eyeR.scale.set(1, eyeScaleY, 1);
     }
 
     rec.root.position.set(x, y + extraY, z);
@@ -2355,17 +3192,56 @@ export class Renderer {
   }
 
   render(dt, timeSec, localState, localMeta, remotePlayers, projectiles, orbStates, mode, panPickup = null) {
-    // Animate cheerful daytime environment
+    // Animate cheerful daytime environment & Central Sun Obelisk
+    const crystalBaseY = this.obeliskCrystalY || 9.0;
+    const crystalBob = Math.sin(timeSec * 2.2) * 0.16;
+
     if (this.obeliskCrystal) {
       this.obeliskCrystal.rotation.y = timeSec * 1.1;
-      this.obeliskCrystal.position.y = 8.2 + Math.sin(timeSec * 2.2) * 0.24;
+      this.obeliskCrystal.position.y = crystalBaseY + crystalBob;
     }
-
-    if (this.obeliskRings.length >= 2) {
-      this.obeliskRings[0].rotation.x = timeSec * 0.9;
-      this.obeliskRings[0].rotation.y = timeSec * 0.5;
-      this.obeliskRings[1].rotation.y = -timeSec * 0.8;
-      this.obeliskRings[1].rotation.z = timeSec * 0.6;
+    if (this.obeliskCrystalCore) {
+      this.obeliskCrystalCore.rotation.y = -timeSec * 2.3;
+      this.obeliskCrystalCore.rotation.x = Math.sin(timeSec * 1.7) * 0.35;
+    }
+    if (this.obeliskShards) {
+      this.obeliskShards.position.y = crystalBaseY + crystalBob;
+      this.obeliskShards.rotation.y = -timeSec * 1.45;
+      this.obeliskShards.rotation.z = Math.sin(timeSec * 1.8) * 0.16;
+    }
+    if (this.obeliskHalo) {
+      this.obeliskHalo.position.y = crystalBaseY + crystalBob;
+      const hs = 4.1 + Math.sin(timeSec * 3.1) * 0.32;
+      this.obeliskHalo.scale.set(hs, hs, 1);
+    }
+    if (this.obeliskBeam) {
+      this.obeliskBeam.material.opacity = 0.34 + Math.sin(timeSec * 4.0) * 0.12;
+      const bs = 0.92 + Math.sin(timeSec * 5.2) * 0.1;
+      this.obeliskBeam.scale.set(bs, 1, bs);
+    }
+    if (this.obeliskRuneDisc) {
+      this.obeliskRuneDisc.rotation.z = timeSec * 0.28;
+    }
+    if (this.obeliskShaftMat) {
+      this.obeliskShaftMat.emissiveIntensity = 0.78 + Math.sin(timeSec * 2.0) * 0.2;
+    }
+    if (this.obeliskRings.length >= 3) {
+      this.obeliskRings[0].rotation.y = timeSec * 0.65;
+      this.obeliskRings[0].rotation.x = Math.sin(timeSec * 0.45) * 0.38;
+      this.obeliskRings[1].rotation.z = -timeSec * 0.92;
+      this.obeliskRings[1].rotation.x = timeSec * 0.48;
+      this.obeliskRings[2].rotation.x = -timeSec * 1.25;
+      this.obeliskRings[2].rotation.y = timeSec * 0.82;
+    }
+    if (this.obeliskMotes?.length) {
+      for (const m of this.obeliskMotes) {
+        const u = (timeSec * m.userData.speed + m.userData.phase) % 1;
+        const ang = m.userData.angle + timeSec * 1.1;
+        const r = m.userData.radius * (1 - u * 0.25);
+        m.position.set(Math.cos(ang) * r, 2.35 + u * 6.4, Math.sin(ang) * r);
+        const ms = Math.sin(u * Math.PI);
+        m.scale.setScalar(0.55 + ms * 0.75);
+      }
     }
 
     for (const fl of this.brazierFlames) {
