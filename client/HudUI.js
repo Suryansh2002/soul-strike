@@ -1,0 +1,652 @@
+import { EMOTES, GAME_MODES, POWERS, RUNES, TEAMS, WEAPONS } from '../shared/constants.js';
+
+export function resolveSavedPlayerName(storage) {
+  if (!storage) return '';
+  const confirmed = storage.getItem('soulstrike_name_confirmed') === '1';
+  if (!confirmed) {
+    storage.removeItem('soulstrike_name');
+    return '';
+  }
+  return (storage.getItem('soulstrike_name') || '').trim().slice(0, 16);
+}
+
+export function sanitizePlayerName(rawValue) {
+  return String(rawValue ?? '').trim().slice(0, 16);
+}
+
+export class HudUI {
+  constructor(callbacks) {
+    this.cb = callbacks;
+    this.shopOpen = false;
+    this.emoteTrayOpen = false;
+    this.killFeed = [];
+    this.hitmarkerTimer = 0;
+    this.hitmarkerHeadshot = false;
+    this.lastShopKey = '';
+    this.lastWeaponKey = '';
+    this.lastAbilityKey = '';
+    this.lastTouchEssence = null;
+
+    this.el = {
+      lobby: document.getElementById('lobby-overlay'),
+      nameInput: document.getElementById('player-name'),
+      nameError: document.getElementById('name-error'),
+      enterBtn: document.getElementById('enter-btn'),
+      hud: document.getElementById('hud'),
+      timer: document.getElementById('match-timer'),
+      scoreBanner: document.getElementById('score-banner'),
+      telemetry: document.getElementById('telemetry'),
+      hpBar: document.getElementById('hp-fill'),
+      hpText: document.getElementById('hp-text'),
+      manaBar: document.getElementById('mana-fill'),
+      manaText: document.getElementById('mana-text'),
+      stamBar: document.getElementById('stam-fill'),
+      essenceText: document.getElementById('essence-text'),
+      abilityBar: document.getElementById('ability-bar'),
+      weaponBar: document.getElementById('weapon-bar'),
+      crosshair: document.getElementById('crosshair'),
+      scopeOverlay: document.getElementById('rail-scope-overlay'),
+      touchBlockBtn: document.getElementById('touch-block-btn'),
+      hitmarker: document.getElementById('hitmarker'),
+      killfeed: document.getElementById('killfeed'),
+      respawnBanner: document.getElementById('respawn-banner'),
+      shopModal: document.getElementById('grimoire-modal'),
+      shopBody: document.getElementById('grimoire-body'),
+      shopEssence: document.getElementById('grimoire-essence'),
+      shopFeedback: document.getElementById('grimoire-feedback'),
+      scoreboard: document.getElementById('scoreboard-modal'),
+      scoreboardBody: document.getElementById('scoreboard-body'),
+      pauseHint: document.getElementById('pause-hint'),
+      matchEndModal: document.getElementById('match-end-modal'),
+      matchEndWinner: document.getElementById('match-end-winner'),
+      damageFlash: document.getElementById('damage-flash'),
+      emoteTray: document.getElementById('emote-tray'),
+      emoteToast: document.getElementById('emote-toast'),
+      shopBtn: document.getElementById('hud-shop-btn'),
+      scoreBtn: document.getElementById('hud-score-btn'),
+      viewBtn: document.getElementById('hud-view-btn'),
+      gyroBtn: document.getElementById('hud-gyro-btn'),
+      autoFireBtn: document.getElementById('hud-autofire-btn'),
+      menuViewBtn: document.getElementById('menu-view-btn'),
+      menuGyroBtn: document.getElementById('menu-gyro-btn'),
+      menuAutoFireBtn: document.getElementById('menu-autofire-btn'),
+      menuAimAssistBtn: document.getElementById('menu-aimassist-btn'),
+      gyroSettingRow: document.getElementById('gyro-setting-row'),
+      autoFireSettingRow: document.getElementById('autofire-setting-row'),
+      aimAssistSettingRow: document.getElementById('aimassist-setting-row'),
+      gyroSensRow: document.getElementById('gyro-sens-row'),
+      touchSensRow: document.getElementById('touch-sens-row'),
+      gyroSensSlider: document.getElementById('gyro-sens-slider'),
+      gyroSensVal: document.getElementById('gyro-sens-val'),
+      touchSensSlider: document.getElementById('touch-sens-slider'),
+      touchSensVal: document.getElementById('touch-sens-val'),
+      hostSettingsNote: document.getElementById('host-settings-note'),
+      matchActionsGroup: document.getElementById('match-actions-group'),
+      btnAddBot: document.getElementById('btn-add-bot'),
+      btnClearBots: document.getElementById('btn-clear-bots'),
+      btnToggleMode: document.getElementById('btn-toggle-mode'),
+      btnResetMatch: document.getElementById('btn-reset-match'),
+    };
+
+    this.renderEmoteTray();
+    this.bindEvents();
+  }
+
+  setTouchMode(isTouch) {
+    document.body.classList.toggle('touch-device', Boolean(isTouch));
+    const tc = document.getElementById('touch-controls');
+    if (tc) tc.classList.toggle('hidden', !isTouch);
+    this.el.gyroBtn?.classList.toggle('hidden', !isTouch);
+    this.el.autoFireBtn?.classList.toggle('hidden', !isTouch);
+    this.el.gyroSettingRow?.classList.toggle('hidden', !isTouch);
+    this.el.autoFireSettingRow?.classList.toggle('hidden', !isTouch);
+    this.el.aimAssistSettingRow?.classList.toggle('hidden', !isTouch);
+    this.el.gyroSensRow?.classList.toggle('hidden', !isTouch);
+    this.el.touchSensRow?.classList.toggle('hidden', !isTouch);
+  }
+
+  setAutoFireUi(enabled) {
+    const on = Boolean(enabled);
+    if (this.el.autoFireBtn) {
+      this.el.autoFireBtn.textContent = on ? 'AUTO ON' : 'AUTO OFF';
+      this.el.autoFireBtn.classList.toggle('active-mode', on);
+    }
+    if (this.el.menuAutoFireBtn) {
+      this.el.menuAutoFireBtn.textContent = on ? 'ON' : 'OFF';
+      this.el.menuAutoFireBtn.classList.toggle('active-btn', on);
+    }
+  }
+
+  setAimAssistUi(enabled) {
+    const on = Boolean(enabled);
+    if (this.el.menuAimAssistBtn) {
+      this.el.menuAimAssistBtn.textContent = on ? 'ON' : 'OFF';
+      this.el.menuAimAssistBtn.classList.toggle('active-btn', on);
+    }
+  }
+
+  setPerspective(mode) {
+    const isTpp = mode === 'tpp';
+    if (this.el.viewBtn) {
+      this.el.viewBtn.innerHTML = `${isTpp ? 'TPP' : 'FPP'}<span class="kbd-hint"> [V]</span>`;
+      this.el.viewBtn.classList.toggle('active-mode', isTpp);
+    }
+    if (this.el.menuViewBtn) {
+      this.el.menuViewBtn.textContent = isTpp ? 'TPP (3rd Person)' : 'FPP (1st Person)';
+      this.el.menuViewBtn.classList.toggle('active-btn', isTpp);
+    }
+  }
+
+  setGyroUi(status) {
+    const enabled = Boolean(status?.enabled);
+    const supported = status?.supported !== false;
+    if (this.el.gyroBtn) {
+      this.el.gyroBtn.textContent = !supported ? 'NO GYRO' : enabled ? 'GYRO ON' : 'GYRO';
+      this.el.gyroBtn.classList.toggle('active-mode', enabled);
+    }
+    if (this.el.menuGyroBtn) {
+      this.el.menuGyroBtn.textContent = !supported ? 'N/A' : enabled ? 'ON' : 'OFF';
+      this.el.menuGyroBtn.classList.toggle('active-btn', enabled);
+    }
+    if (status?.sensitivity && this.el.gyroSensSlider) {
+      this.el.gyroSensSlider.value = String(Number(status.sensitivity).toFixed(1));
+    }
+    if (status?.sensitivity && this.el.gyroSensVal) {
+      this.el.gyroSensVal.textContent = `${Number(status.sensitivity).toFixed(1)}x`;
+    }
+  }
+
+  setTouchSensitivityUi(mult) {
+    const v = Number(mult || 1).toFixed(1);
+    if (this.el.touchSensSlider) this.el.touchSensSlider.value = v;
+    if (this.el.touchSensVal) this.el.touchSensVal.textContent = `${v}x`;
+  }
+
+  bindEvents() {
+    const savedName = resolveSavedPlayerName(localStorage);
+    this.el.nameInput.value = savedName;
+
+    this.el.nameInput.addEventListener('input', () => {
+      if (sanitizePlayerName(this.el.nameInput.value)) {
+        this.el.nameInput.classList.remove('input-error');
+        this.el.nameError?.classList.add('hidden');
+      }
+    });
+
+    this.el.nameInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        this.el.enterBtn.click();
+      }
+    });
+
+    this.el.enterBtn.addEventListener('click', () => {
+      const name = sanitizePlayerName(this.el.nameInput.value);
+      if (!name) {
+        this.el.nameInput.classList.add('input-error');
+        this.el.nameError?.classList.remove('hidden');
+        this.el.nameInput.focus();
+        return;
+      }
+      this.el.nameInput.classList.remove('input-error');
+      this.el.nameError?.classList.add('hidden');
+      localStorage.setItem('soulstrike_name', name);
+      localStorage.setItem('soulstrike_name_confirmed', '1');
+      const modeBtn = document.querySelector('.mode-btn.active');
+      const mode = modeBtn ? modeBtn.dataset.mode : 'ffa';
+      this.cb.onEnterGame(name, mode);
+    });
+
+    document.querySelectorAll('.mode-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.mode-btn').forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+      });
+    });
+
+    document.getElementById('close-grimoire').addEventListener('click', () => {
+      this.setShopOpen(false);
+      this.cb.onResumePointer();
+    });
+
+    document.getElementById('resume-btn').addEventListener('click', () => {
+      this.cb.onResumePointer();
+    });
+
+    this.el.shopBtn?.addEventListener('click', () => this.cb.onOpenShop?.());
+    document.getElementById('hud-emote-btn')?.addEventListener('click', () => this.cb.onToggleEmoteTray?.());
+    this.el.viewBtn?.addEventListener('click', () => {
+      this.el.viewBtn.blur();
+      this.cb.onTogglePerspective?.();
+    });
+    this.el.gyroBtn?.addEventListener('click', () => {
+      this.el.gyroBtn.blur();
+      this.cb.onToggleGyro?.();
+    });
+    this.el.autoFireBtn?.addEventListener('click', () => {
+      this.el.autoFireBtn.blur();
+      this.cb.onToggleAutoFire?.();
+    });
+    this.el.scoreBtn?.addEventListener('click', () => this.cb.onToggleScoreboard?.());
+    this.el.scoreBanner?.addEventListener('click', () => this.cb.onToggleScoreboard?.());
+    this.el.timer?.addEventListener('click', () => this.cb.onToggleScoreboard?.());
+    document.getElementById('hud-menu-btn')?.addEventListener('click', () => this.cb.onOpenMenu?.());
+    this.el.menuViewBtn?.addEventListener('click', () => this.cb.onTogglePerspective?.());
+    this.el.menuGyroBtn?.addEventListener('click', () => this.cb.onToggleGyro?.());
+    this.el.menuAutoFireBtn?.addEventListener('click', () => this.cb.onToggleAutoFire?.());
+    this.el.menuAimAssistBtn?.addEventListener('click', () => this.cb.onToggleAimAssist?.());
+    this.el.gyroSensSlider?.addEventListener('input', (e) => {
+      this.cb.onGyroSensChange?.(Number(e.target.value));
+    });
+    this.el.touchSensSlider?.addEventListener('input', (e) => {
+      this.cb.onTouchSensChange?.(Number(e.target.value));
+    });
+    document.getElementById('close-scoreboard')?.addEventListener('click', () => {
+      this.setScoreboardOpen(false);
+      this.cb.onResumePointer();
+    });
+
+    document.getElementById('btn-add-bot').addEventListener('click', () => this.cb.onMatchCmd('add_bot'));
+    document.getElementById('btn-clear-bots').addEventListener('click', () => this.cb.onMatchCmd('clear_bots'));
+    document.getElementById('btn-toggle-mode').addEventListener('click', () => this.cb.onToggleMode());
+    document.getElementById('btn-reset-match').addEventListener('click', () => this.cb.onMatchCmd('reset_match'));
+
+    // Single delegated listener so clicking shop buttons is never lost between snapshot updates
+    this.el.shopBody.addEventListener('click', (e) => {
+      const btn = e.target.closest('.shop-btn');
+      if (!btn || btn.disabled) return;
+      this.cb.onBuy(btn.dataset.cat, btn.dataset.id);
+    });
+
+    // Tappable weapon & power slots (especially for mobile!)
+    const handleWeaponTap = (e) => {
+      const pill = e.target.closest('.slot-pill');
+      if (!pill || pill.classList.contains('locked')) return;
+      e.preventDefault();
+      let targetWeapon = pill.dataset.weapon;
+      if (pill.classList.contains('active') && targetWeapon !== 'pan' && document.body.classList.contains('touch-device')) {
+        const unlocked = [...this.el.weaponBar.querySelectorAll('.slot-pill:not(.locked)')].filter(
+          (p) => p.dataset.weapon !== 'pan'
+        );
+        if (unlocked.length > 1) {
+          const idx = unlocked.indexOf(pill);
+          targetWeapon = unlocked[(idx + 1) % unlocked.length].dataset.weapon;
+        }
+      }
+      this.cb.onSelectWeapon?.(targetWeapon);
+    };
+    this.el.weaponBar.addEventListener('touchstart', handleWeaponTap, { passive: false });
+    this.el.weaponBar.addEventListener('click', handleWeaponTap);
+
+    const handlePowerTap = (e) => {
+      const slot = e.target.closest('.power-slot');
+      if (!slot || slot.classList.contains('locked')) return;
+      e.preventDefault();
+      this.cb.onCastPower?.(slot.dataset.power);
+    };
+    this.el.abilityBar.addEventListener('touchstart', handlePowerTap, { passive: false });
+    this.el.abilityBar.addEventListener('click', handlePowerTap);
+
+    const handleEmoteTap = (e) => {
+      const btn = e.target.closest('.emote-btn');
+      if (!btn) return;
+      e.preventDefault();
+      this.cb.onTriggerEmote?.(btn.dataset.emote);
+    };
+    this.el.emoteTray?.addEventListener('touchstart', handleEmoteTap, { passive: false });
+    this.el.emoteTray?.addEventListener('click', handleEmoteTap);
+  }
+
+  renderEmoteTray() {
+    if (!this.el.emoteTray) return;
+    this.el.emoteTray.innerHTML = Object.values(EMOTES)
+      .map(
+        (em) => `
+        <button class="emote-btn" type="button" data-emote="${em.id}" style="--ecolor:${em.color}">
+          <span class="emote-key">${em.key}</span>
+          <span>${em.name}</span>
+        </button>`
+      )
+      .join('');
+  }
+
+  setEmoteTrayOpen(open) {
+    this.emoteTrayOpen = open;
+    this.el.emoteTray?.classList.toggle('hidden', !open);
+    if (open) {
+      this.el.pauseHint.classList.add('hidden');
+    }
+  }
+
+  showEmoteToast(label, variant = '') {
+    if (!this.el.emoteToast) return;
+    this.el.emoteToast.textContent = label.toUpperCase();
+    this.el.emoteToast.classList.remove('hidden', 'pan-toast');
+    if (variant) this.el.emoteToast.classList.add(variant);
+    clearTimeout(this._emoteToastTimer);
+    this._emoteToastTimer = setTimeout(() => {
+      this.el.emoteToast.classList.add('hidden');
+      this.el.emoteToast.classList.remove('pan-toast');
+    }, 1850);
+  }
+
+  showLobby(visible) {
+    this.el.lobby.classList.toggle('hidden', !visible);
+    this.el.hud.classList.toggle('hidden', visible);
+  }
+
+  setPauseOverlay(show) {
+    this.el.pauseHint.classList.toggle('hidden', !show || this.shopOpen || this.emoteTrayOpen);
+  }
+
+  setShopOpen(open, me = null) {
+    this.shopOpen = open;
+    this.el.shopModal.classList.toggle('hidden', !open);
+    if (open) {
+      this.setEmoteTrayOpen(false);
+      this.el.pauseHint.classList.add('hidden');
+      this.lastShopKey = '';
+      if (me) this.renderShop(me);
+    }
+  }
+
+  showShopFeedback(msg, isError = false) {
+    if (!this.el.shopFeedback) return;
+    this.el.shopFeedback.textContent = msg;
+    this.el.shopFeedback.classList.toggle('error', isError);
+    this.el.shopFeedback.classList.remove('hidden');
+    clearTimeout(this._shopFbTimer);
+    this._shopFbTimer = setTimeout(() => {
+      this.el.shopFeedback.classList.add('hidden');
+    }, 2400);
+  }
+
+  setScoreboardOpen(open) {
+    if (open) this.setEmoteTrayOpen(false);
+    this.el.scoreboard.classList.toggle('hidden', !open);
+  }
+
+  isScoreboardOpen() {
+    return !this.el.scoreboard.classList.contains('hidden');
+  }
+
+  flashDamage() {
+    this.el.damageFlash.classList.add('active');
+    clearTimeout(this._dmgT);
+    this._dmgT = setTimeout(() => this.el.damageFlash.classList.remove('active'), 160);
+  }
+
+  triggerHitmarker(headshot) {
+    this.hitmarkerTimer = 0.18;
+    this.hitmarkerHeadshot = headshot;
+  }
+
+  pushKillEvent(ev) {
+    this.killFeed.unshift({ ...ev, ts: performance.now() });
+    if (this.killFeed.length > 5) this.killFeed.pop();
+    this.renderKillFeed();
+  }
+
+  renderKillFeed() {
+    this.el.killfeed.innerHTML = this.killFeed
+      .map(
+        (k) => `
+        <div class="kf-row">
+          <span class="kf-killer team-${k.killerTeam}">${escapeHtml(k.killerName)}</span>
+          <span class="kf-weapon${k.source === 'Golden Pan' ? ' kf-pan' : ''}">${escapeHtml(k.source)}${k.headshot ? ' <b>HS</b>' : ''}</span>
+          <span class="kf-victim team-${k.victimTeam}">${escapeHtml(k.victimName)}</span>
+        </div>`
+      )
+      .join('');
+  }
+
+  renderShop(me) {
+    if (!me) return;
+    this.el.shopEssence.textContent = `${me.es} Souls`;
+
+    const shopKey = `${me.es}|${me.wp}|${me.uw.join(',')}|${me.up.join(',')}|${JSON.stringify(me.rn || {})}`;
+    if (shopKey === this.lastShopKey) return;
+    this.lastShopKey = shopKey;
+
+    const weaponsHtml = Object.values(WEAPONS)
+      .filter((w) => !w.pickupOnly)
+      .map((w) => {
+        const owned = me.uw.includes(w.id);
+        const equipped = me.wp === w.id;
+        const canBuy = me.es >= w.cost;
+        const btnLabel = equipped ? 'EQUIPPED' : owned ? 'EQUIP' : `UNLOCK · ${w.cost}`;
+        return `
+          <div class="shop-card ${equipped ? 'equipped' : owned ? 'owned' : ''}" style="--item-accent:${w.color}">
+            <div class="shop-card-top">
+              <span class="shop-key">${w.slot}</span>
+              <span class="shop-title">${w.name}</span>
+            </div>
+            <div class="shop-desc">${w.desc}</div>
+            <button class="shop-btn ${equipped ? 'is-equipped' : ''}" data-cat="weapon" data-id="${w.id}" ${!owned && !canBuy ? 'disabled' : ''}>
+              ${btnLabel}
+            </button>
+          </div>`;
+      })
+      .join('');
+
+    const powersHtml = Object.values(POWERS)
+      .map((p) => {
+        const owned = me.up.includes(p.id);
+        const canBuy = me.es >= p.cost;
+        return `
+          <div class="shop-card ${owned ? 'owned' : ''}" style="--item-accent:${p.color}">
+            <div class="shop-card-top">
+              <span class="shop-key">${p.key}</span>
+              <span class="shop-title">${p.name}</span>
+            </div>
+            <div class="shop-desc">${p.desc}</div>
+            <button class="shop-btn ${owned ? 'is-owned' : ''}" data-cat="power" data-id="${p.id}" ${owned || !canBuy ? 'disabled' : ''}>
+              ${owned ? 'UNLOCKED' : `UNLOCK · ${p.cost}`}
+            </button>
+          </div>`;
+      })
+      .join('');
+
+    const runesHtml = Object.values(RUNES)
+      .map((r) => {
+        const rank = (me.rn && me.rn[r.id]) || 0;
+        const maxed = rank >= r.maxRank;
+        const cost = maxed ? 0 : r.costs[rank];
+        const canBuy = !maxed && me.es >= cost;
+        return `
+          <div class="shop-card ${rank > 0 ? 'owned' : ''}" style="--item-accent:#f59e0b">
+            <div class="shop-card-top">
+              <span class="shop-key">LV ${rank}/${r.maxRank}</span>
+              <span class="shop-title">${r.name}</span>
+            </div>
+            <div class="shop-desc">${r.desc}</div>
+            <button class="shop-btn ${maxed ? 'is-owned' : ''}" data-cat="rune" data-id="${r.id}" ${maxed || !canBuy ? 'disabled' : ''}>
+              ${maxed ? 'MAXED' : `UPGRADE · ${cost}`}
+            </button>
+          </div>`;
+      })
+      .join('');
+
+    this.el.shopBody.innerHTML = `
+      <div class="shop-section"><h3>Weapons (Keys 1–3)</h3><div class="shop-grid">${weaponsHtml}</div></div>
+      <div class="shop-section"><h3>Spells (Keys Q E R F G)</h3><div class="shop-grid">${powersHtml}</div></div>
+      <div class="shop-section"><h3>Passive Upgrades</h3><div class="shop-grid">${runesHtml}</div></div>
+    `;
+  }
+
+  update(dt, snap, me, predState, telemetry) {
+    const isScoped = Boolean(telemetry?.scoped && me && me.al && me.wp === 'rail');
+    const isLocked = Boolean(telemetry?.targetLocked && me && me.al);
+    this.el.scopeOverlay?.classList.toggle('hidden', !isScoped);
+    this.el.scopeOverlay?.classList.toggle('target-locked', isScoped && isLocked);
+    this.el.crosshair?.classList.toggle('hidden', isScoped);
+    this.el.crosshair?.classList.toggle('target-locked', !isScoped && isLocked);
+    if (this.el.touchBlockBtn && me) {
+      const wantLabel = me.wp === 'rail' ? 'SCOPE' : 'GUARD';
+      if (this.el.touchBlockBtn.textContent !== wantLabel) {
+        this.el.touchBlockBtn.textContent = wantLabel;
+      }
+    }
+    if (me && this.el.shopBtn && document.body.classList.contains('touch-device')) {
+      if (this.lastTouchEssence !== me.es) {
+        this.lastTouchEssence = me.es;
+        this.el.shopBtn.textContent = `SHOP · ${me.es}✦`;
+      }
+    }
+
+    if (this.hitmarkerTimer > 0) {
+      this.hitmarkerTimer = Math.max(0, this.hitmarkerTimer - dt);
+      this.el.hitmarker.classList.remove('hidden');
+      this.el.hitmarker.classList.toggle('headshot', this.hitmarkerHeadshot);
+    } else {
+      this.el.hitmarker.classList.add('hidden');
+    }
+
+    // Expire old killfeed entries
+    const nowPerf = performance.now();
+    if (this.killFeed.some((k) => nowPerf - k.ts > 7000)) {
+      this.killFeed = this.killFeed.filter((k) => nowPerf - k.ts <= 7000);
+      this.renderKillFeed();
+    }
+
+    const transportMap = {
+      host: 'HOST P2P',
+      'p2p-udp': 'P2P UDP',
+      'p2p-relay': 'P2P RELAY',
+    };
+    const transportLabel = transportMap[telemetry.transport] || '';
+    const modePrefix = transportLabel ? `${transportLabel} · ` : '';
+    this.el.telemetry.textContent = `${modePrefix}${Math.round(telemetry.rtt)}ms · ${Math.round(telemetry.fps)} FPS`;
+
+    if (!snap) return;
+
+    const mins = Math.floor(snap.mt / 60);
+    const secs = String(snap.mt % 60).padStart(2, '0');
+    this.el.timer.textContent = `${mins}:${secs}`;
+
+    if (snap.md === GAME_MODES.TDM) {
+      this.el.scoreBanner.innerHTML = `
+        <span class="team-1">RED ${snap.ts[TEAMS.CRIMSON] || 0}</span>
+        <span class="vs-sep">VS</span>
+        <span class="team-2">${snap.ts[TEAMS.AZURE] || 0} BLUE</span>`;
+    } else {
+      const top = [...snap.pl].sort((a, b) => b.kl - a.kl)[0];
+      this.el.scoreBanner.innerHTML = `<span class="ffa-badge">FFA</span>${
+        top ? `<span class="leader-txt">1st: ${escapeHtml(top.n)} (${top.kl})</span>` : ''
+      }`;
+    }
+
+    // Match End screen
+    if (snap.ms === 'ended') {
+      this.el.matchEndModal.classList.remove('hidden');
+    } else {
+      this.el.matchEndModal.classList.add('hidden');
+    }
+
+    // Scoreboard & Host Settings Permission State
+    const resolvedHostId = telemetry.hostId || snap.hi;
+    const canManage = Boolean(telemetry.canManageServer);
+    const hostPlayer = snap.pl?.find((p) => p.id === resolvedHostId);
+
+    for (const btn of [this.el.btnAddBot, this.el.btnClearBots, this.el.btnToggleMode, this.el.btnResetMatch]) {
+      if (!btn) continue;
+      btn.disabled = !canManage;
+      btn.classList.toggle('disabled-btn', !canManage);
+    }
+    if (this.el.hostSettingsNote) {
+      this.el.hostSettingsNote.textContent = canManage
+        ? 'Server Controls — You are the Lobby Host'
+        : `Server Controls Locked — Managed by ${hostPlayer ? hostPlayer.n : 'Lobby Host'}`;
+      this.el.hostSettingsNote.classList.toggle('locked', !canManage);
+    }
+
+    const sorted = [...snap.pl].sort((a, b) => b.kl - a.kl || a.dh - b.dh);
+    this.el.scoreboardBody.innerHTML = sorted
+      .map(
+        (p) => `
+        <tr class="${me && p.id === me.id ? 'me-row' : ''}">
+          <td class="team-${p.tm}">${escapeHtml(p.n)}${p.b ? ' <small>[BOT]</small>' : ''}${
+            resolvedHostId && p.id === resolvedHostId ? ' <small>[HOST]</small>' : ''
+          }</td>
+          <td>${p.kl}</td>
+          <td>${p.dh}</td>
+          <td>${p.hs}</td>
+          <td>${p.dm}</td>
+          <td>${p.es}</td>
+        </tr>`
+      )
+      .join('');
+
+    if (!me) return;
+
+    const hp = me.hp;
+    const mhp = me.mhp || 120;
+    this.el.hpBar.style.width = `${Math.max(0, Math.min(100, (hp / mhp) * 100))}%`;
+    this.el.hpText.textContent = `${hp} / ${mhp}`;
+
+    const mana = me.mn;
+    this.el.manaBar.style.width = `${Math.max(0, Math.min(100, mana))}%`;
+    this.el.manaText.textContent = `${mana}`;
+
+    const stam = predState ? Math.round(predState.stamina) : me.st;
+    this.el.stamBar.style.width = `${Math.max(0, Math.min(100, stam))}%`;
+    this.el.essenceText.textContent = `${me.es}`;
+
+    this.el.respawnBanner.classList.toggle('hidden', Boolean(me.al));
+    if (!me.al) {
+      const shopTip = document.body.classList.contains('touch-device') ? 'Tap SHOP to upgrade' : 'Press B for Shop';
+      this.el.respawnBanner.innerHTML = `<div class="respawn-title">KNOCKED OUT</div><div class="respawn-sub">Back in ${Math.max(0.1, me.rt).toFixed(1)}s · ${shopTip}</div>`;
+    }
+
+    // Weapon slots
+    const weaponKey = `${me.wp}|${me.uw.join(',')}`;
+    if (weaponKey !== this.lastWeaponKey) {
+      this.lastWeaponKey = weaponKey;
+      const standardHtml = Object.values(WEAPONS)
+        .filter((w) => !w.pickupOnly)
+        .map((w) => {
+          const unlocked = me.uw.includes(w.id);
+          const active = me.wp === w.id;
+          return `<div class="slot-pill ${active ? 'active' : ''} ${!unlocked ? 'locked' : ''}" data-weapon="${w.id}">
+            <span class="slot-key">${w.slot}</span>
+            <span class="slot-name">${w.name}</span>
+          </div>`;
+        })
+        .join('');
+      const panHtml =
+        me.wp === 'pan' && WEAPONS.pan
+          ? `<div class="slot-pill active pan-pill" data-weapon="pan">
+              <span class="slot-key">${WEAPONS.pan.slot}</span>
+              <span class="slot-name">${WEAPONS.pan.name} (1 SHOT)</span>
+            </div>`
+          : '';
+      this.el.weaponBar.innerHTML = standardHtml + panHtml;
+    }
+
+    // Power slots
+    const abilityKey = `${me.mn}|${me.up.join(',')}|${Object.entries(me.cds || {})
+      .map(([k, v]) => `${k}:${v > 0 ? v.toFixed(1) : '0'}`)
+      .join(',')}`;
+    if (abilityKey !== this.lastAbilityKey) {
+      this.lastAbilityKey = abilityKey;
+      this.el.abilityBar.innerHTML = Object.values(POWERS)
+        .map((p) => {
+          const unlocked = me.up.includes(p.id);
+          const cd = (me.cds && me.cds[p.id]) || 0;
+          const noMana = me.mn < p.manaCost;
+          return `<div class="power-slot ${!unlocked ? 'locked' : ''} ${cd > 0 ? 'cooldown' : ''} ${
+            unlocked && noMana ? 'nomana' : ''
+          }" data-power="${p.id}" style="--pcolor:${p.color}">
+            <div class="power-key">${p.key}</div>
+            <div class="power-label">${unlocked ? p.name.split(' ')[1] || p.name : `${p.cost}g`}</div>
+            ${cd > 0 ? `<div class="power-cd">${cd.toFixed(1)}</div>` : ''}
+          </div>`;
+        })
+        .join('');
+    }
+  }
+}
+
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}

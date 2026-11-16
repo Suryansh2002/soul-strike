@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#162032" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="SoulStrike" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/svg+xml" href="/icons/icon.svg" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon.png" />
+    <title>SoulStrike Arena — 3D Fantasy TDM / FFA</title>
+    <link rel="stylesheet" href="/styles/main.css" />
+  </head>
+  <body>
+    <canvas id="game-canvas"></canvas>
+
+    <!-- Lobby Overlay -->
+    <div id="lobby-overlay" class="overlay-screen">
+      <div class="lobby-card">
+        <div class="lobby-badge">3D MEADOW ARENA</div>
+        <h1>SOULSTRIKE ARENA</h1>
+        <p class="lobby-sub">
+          Jump in, grab weapons and spells from the Shop, and battle friends in Free-For-All or Team mode.
+        </p>
+
+        <div class="form-group">
+          <label for="player-name">Player Name</label>
+          <input id="player-name" type="text" maxlength="16" placeholder="Enter your name..." autocomplete="nickname" />
+          <p id="name-error" class="form-error hidden">Please enter your name before joining!</p>
+        </div>
+
+        <div class="form-group">
+          <label>Game Mode</label>
+          <div class="mode-row">
+            <button class="mode-btn active" data-mode="ffa">Free-For-All</button>
+            <button class="mode-btn" data-mode="tdm">Team Deathmatch</button>
+          </div>
+        </div>
+
+        <button id="enter-btn" class="primary-btn">PLAY NOW</button>
+        <button id="install-app-btn" class="install-btn hidden" type="button">INSTALL APP</button>
+        <p id="ios-install-tip" class="ios-install-tip hidden">
+          iPhone/iPad: tap <strong>Share</strong> then <strong>Add to Home Screen</strong> to install.
+        </p>
+
+        <div class="controls-grid">
+          <div><kbd>WASD</kbd><kbd>Space</kbd> Move &amp; Jump</div>
+          <div><kbd>LMB</kbd><kbd>RMB</kbd> Attack &amp; Guard</div>
+          <div><kbd>Q E R F G</kbd><kbd>B</kbd> Powers &amp; Shop</div>
+          <div><kbd>4–9</kbd><kbd>T</kbd> Emotes · <kbd>V</kbd> FPP/TPP</div>
+        </div>
+        <div class="touch-guide-grid">
+          <div><strong>Left Screen</strong> Floating Stick</div>
+          <div><strong>Swipe / Gyro</strong> Aim Assist</div>
+          <div><strong>Auto-Fire</strong> Shoot on Sight</div>
+          <div><strong>FIRE / SCOPE</strong> Drag &amp; Shoot</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- In-Game HUD -->
+    <div id="hud" class="hidden">
+      <div id="damage-flash"></div>
+
+      <!-- Touch Controls Layer (shown on touch devices) -->
+      <div id="touch-controls" class="hidden">
+        <div id="touch-look-zone"></div>
+        <div id="touch-move-zone">
+          <div id="touch-joy-base" class="joy-base">
+            <div class="joy-ring"></div>
+            <div id="touch-joy-knob" class="joy-knob"></div>
+          </div>
+        </div>
+        <div class="touch-actions">
+          <button id="touch-fire-btn" class="touch-btn fire" type="button">FIRE</button>
+          <button id="touch-jump-btn" class="touch-btn jump" type="button">JUMP</button>
+          <button id="touch-dash-btn" class="touch-btn dash" type="button">DASH</button>
+          <button id="touch-block-btn" class="touch-btn block" type="button">GUARD</button>
+        </div>
+      </div>
+
+      <!-- Quick Mobile / Mouse HUD Bar -->
+      <div class="hud-quick-actions">
+        <button id="hud-shop-btn" class="quick-btn shop-cta" type="button">SHOP<span class="kbd-hint"> [B]</span></button>
+        <button id="hud-emote-btn" class="quick-btn" type="button">EMOTE<span class="kbd-hint"> [T]</span></button>
+        <button id="hud-view-btn" class="quick-btn" type="button">FPP<span class="kbd-hint"> [V]</span></button>
+        <button id="hud-gyro-btn" class="quick-btn hidden" type="button">GYRO</button>
+        <button id="hud-autofire-btn" class="quick-btn hidden" type="button">AUTO ON</button>
+        <button id="hud-score-btn" class="quick-btn" type="button">RANKS</button>
+        <button id="hud-menu-btn" class="quick-btn" type="button">MENU</button>
+      </div>
+
+      <div class="hud-top">
+        <div id="score-banner" class="hud-pill">FFA MATCH</div>
+        <div id="match-timer" class="hud-pill timer-pill">5:00</div>
+        <div id="telemetry" class="hud-pill telemetry-pill">--ms | -- FPS</div>
+      </div>
+
+      <div id="killfeed"></div>
+
+      <!-- Crosshair & Hitmarker -->
+      <div id="crosshair">
+        <div class="ch-line ch-t"></div>
+        <div class="ch-line ch-b"></div>
+        <div class="ch-line ch-l"></div>
+        <div class="ch-line ch-r"></div>
+        <div class="ch-dot"></div>
+      </div>
+      <div id="rail-scope-overlay" class="rail-scope-overlay hidden" aria-hidden="true">
+        <div class="scope-lens">
+          <div class="scope-ring-outer"></div>
+          <div class="scope-ring-inner"></div>
+          <div class="scope-line scope-line-h"></div>
+          <div class="scope-line scope-line-v"></div>
+          <div class="scope-ticks scope-ticks-h">
+            <span></span><span></span><span></span><span></span>
+          </div>
+          <div class="scope-ticks scope-ticks-v">
+            <span></span><span></span><span></span><span></span>
+          </div>
+          <div class="scope-center-dot"></div>
+          <div class="scope-readout">ASTRAL OPTIC · 2.8x</div>
+        </div>
+      </div>
+      <div id="hitmarker" class="hidden">
+        <span></span><span></span><span></span><span></span>
+      </div>
+
+      <div id="respawn-banner" class="hidden"></div>
+      <div id="emote-toast" class="emote-toast hidden"></div>
+      <div id="emote-tray" class="emote-tray hidden"></div>
+
+      <!-- Bottom Status & Abilities -->
+      <div class="hud-bottom">
+        <div class="vitals-panel hud-panel">
+          <div class="essence-row">
+            <span class="coin-dot" aria-hidden="true"></span>
+            <span id="essence-text">175</span>
+            <small>SOULS · SHOP [B]</small>
+          </div>
+          <div class="bar-row">
+            <span class="bar-label">HP</span>
+            <div class="bar-track"><div id="hp-fill" class="bar-fill hp"></div></div>
+            <span id="hp-text" class="bar-val">120</span>
+          </div>
+          <div class="bar-row">
+            <span class="bar-label">MP</span>
+            <div class="bar-track"><div id="mana-fill" class="bar-fill mana"></div></div>
+            <span id="mana-text" class="bar-val">100</span>
+          </div>
+          <div class="bar-row">
+            <span class="bar-label">ST</span>
+            <div class="bar-track thin"><div id="stam-fill" class="bar-fill stam"></div></div>
+          </div>
+        </div>
+
+        <div class="loadout-panel">
+          <div id="weapon-bar"></div>
+          <div id="ability-bar"></div>
+        </div>
+      </div>
+
+      <!-- Pause / Match Controls Overlay -->
+      <div id="pause-hint" class="overlay-screen hidden">
+        <div class="pause-card">
+          <h2>MATCH MENU</h2>
+          <p>Resume the fight or update bots and match settings.</p>
+          <button id="resume-btn" class="primary-btn">RESUME</button>
+          <div class="settings-box">
+            <div class="setting-row">
+              <span>Camera View</span>
+              <button id="menu-view-btn" class="sec-btn mini-btn" type="button">FPP (1st Person)</button>
+            </div>
+            <div id="gyro-setting-row" class="setting-row hidden">
+              <span>Gyroscope Aim</span>
+              <button id="menu-gyro-btn" class="sec-btn mini-btn" type="button">OFF</button>
+            </div>
+            <div id="autofire-setting-row" class="setting-row hidden">
+              <span>Auto-Fire (Crosshair)</span>
+              <button id="menu-autofire-btn" class="sec-btn mini-btn" type="button">ON</button>
+            </div>
+            <div id="aimassist-setting-row" class="setting-row hidden">
+              <span>Aim Assist</span>
+              <button id="menu-aimassist-btn" class="sec-btn mini-btn" type="button">ON</button>
+            </div>
+            <label id="gyro-sens-row" class="setting-slider hidden" for="gyro-sens-slider">
+              <span>Gyro Sensitivity <strong id="gyro-sens-val">1.8x</strong></span>
+              <input id="gyro-sens-slider" type="range" min="0.5" max="3.0" step="0.1" value="1.8" />
+            </label>
+            <label id="touch-sens-row" class="setting-slider hidden" for="touch-sens-slider">
+              <span>Touch Look Speed <strong id="touch-sens-val">1.0x</strong></span>
+              <input id="touch-sens-slider" type="range" min="0.5" max="2.5" step="0.1" value="1.0" />
+            </label>
+          </div>
+          <p id="host-settings-note" class="hint-small host-settings-note">
+            Server Settings (Host Controls)
+          </p>
+          <div id="match-actions-group" class="match-actions">
+            <button id="btn-add-bot" class="sec-btn">+ Add Bot</button>
+            <button id="btn-clear-bots" class="sec-btn">Clear Bots</button>
+            <button id="btn-toggle-mode" class="sec-btn">Switch FFA / TDM</button>
+            <button id="btn-reset-match" class="sec-btn">Restart Match</button>
+          </div>
+          <p class="hint-small desktop-only-hint">Press <strong>B</strong> for Shop · <strong>V</strong> to toggle FPP / TPP.</p>
+        </div>
+      </div>
+
+      <!-- Item Shop Modal (B) -->
+      <div id="grimoire-modal" class="overlay-screen hidden">
+        <div class="grimoire-card">
+          <div class="grimoire-header">
+            <div>
+              <h2>ITEM SHOP</h2>
+              <span class="grimoire-sub">Unlock weapons, spells &amp; passive upgrades</span>
+            </div>
+            <div class="grimoire-right">
+              <span id="grimoire-essence" class="essence-badge">0 Souls</span>
+              <button id="close-grimoire" class="sec-btn">Close</button>
+            </div>
+          </div>
+          <div id="grimoire-feedback" class="grimoire-feedback hidden"></div>
+          <div id="grimoire-body"></div>
+        </div>
+      </div>
+
+      <!-- Scoreboard Modal (Tab / RANKS) -->
+      <div id="scoreboard-modal" class="overlay-screen hidden">
+        <div class="scoreboard-card">
+          <div class="scoreboard-head">
+            <h2>SCOREBOARD</h2>
+            <button id="close-scoreboard" class="sec-btn">Close</button>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Player</th>
+                  <th>Kills</th>
+                  <th>Deaths</th>
+                  <th>Headshots</th>
+                  <th>Damage</th>
+                  <th>Souls</th>
+                </tr>
+              </thead>
+              <tbody id="scoreboard-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Match End Modal -->
+      <div id="match-end-modal" class="overlay-screen hidden">
+        <div class="pause-card">
+          <div class="lobby-badge">MATCH OVER</div>
+          <h2 id="match-end-winner">Champion Wins!</h2>
+          <p>Next round starts in a moment...</p>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/client/main.js"></script>
+  </body>
+</html>
