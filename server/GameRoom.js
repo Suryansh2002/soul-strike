@@ -1,4 +1,5 @@
 import {
+  BOT_DIFFICULTIES,
   EMOTE_COOLDOWN,
   EMOTES,
   ESSENCE_REWARDS,
@@ -33,6 +34,7 @@ import {
   WEAPONS,
   getThrownPanHitRadius,
   getThrownPanScale,
+  normalizeBotDifficulty,
 } from '../shared/constants.js';
 import { ARENA_BOXES, ARENA_HALF_SIZE, JUMP_PADS, ORB_SPAWNS, SPAWN_POINTS, findRandomPanSpawn } from '../shared/arena.js';
 import {
@@ -73,6 +75,7 @@ export class GameRoom {
     this.checkpointSeq = 0;
     this.hostId = null;
     this.managerId = null;
+    this.botDifficulty = BOT_DIFFICULTIES.NORMAL;
   }
 
   start() {
@@ -290,7 +293,7 @@ export class GameRoom {
     const id = `b${this.nextEntityId++}`;
     const bot = this.createPlayerEntity(id, createBotName(existing), null, true);
     this.players.set(id, bot);
-    this.bots.set(id, new BotController(id));
+    this.bots.set(id, new BotController(id, this.botDifficulty));
     return bot;
   }
 
@@ -451,6 +454,11 @@ export class GameRoom {
     } else if (msg.cmd === 'set_mode' && (msg.mode === GAME_MODES.FFA || msg.mode === GAME_MODES.TDM)) {
       this.mode = msg.mode;
       this.resetMatch();
+    } else if (msg.cmd === 'set_bot_difficulty') {
+      this.botDifficulty = normalizeBotDifficulty(msg.difficulty);
+      for (const botCtrl of this.bots.values()) {
+        botCtrl.setDifficulty(this.botDifficulty);
+      }
     } else if (msg.cmd === 'reset_match') {
       this.resetMatch();
     } else {
@@ -1081,11 +1089,17 @@ export class GameRoom {
               attacker.slowTimer = Math.max(attacker.slowTimer, 1.4);
             }
           }
+          if (victim.isBot && attacker && !attacker.isBot) {
+            this.bots.get(victim.id)?.onBlockedOrParriedHuman?.(victim, attacker, this, true);
+          }
           return 0;
         }
         const blockRatio = victim.weapon === 'runeblade' ? 0.25 : 0.35;
         dmg = Math.max(1, Math.round(dmg * blockRatio));
         victim.stamina = Math.max(0, victim.stamina - 10);
+        if (victim.isBot && attacker && !attacker.isBot) {
+          this.bots.get(victim.id)?.onBlockedOrParriedHuman?.(victim, attacker, this, false);
+        }
       }
     }
 
@@ -1142,9 +1156,11 @@ export class GameRoom {
         }
       }
 
-      if (killer.isBot && killer.alive && Math.random() < 0.45) {
-        const botEmotes = ['dance', 'cheer', 'twerk', 'wave', 'spin'];
-        this.handleEmote(killer, botEmotes[Math.floor(Math.random() * botEmotes.length)]);
+      if (killer.isBot && killer.alive) {
+        const botCtrl = this.bots.get(killer.id);
+        if (botCtrl) {
+          botCtrl.onScoreKill(killer, victim, this);
+        }
       }
     }
 
@@ -1245,7 +1261,14 @@ export class GameRoom {
         const botCtrl = this.bots.get(p.id);
         if (botCtrl) {
           const botInput = botCtrl.step(p, this, dt);
-          if (botInput) stepPlayerPhysics(p, botInput, dt, ARENA_BOXES, JUMP_PADS);
+          if (botInput) {
+            const wasBlocking = p.blocking;
+            p.blocking = Boolean(botInput.block && p.stamina > 2);
+            if (p.blocking && !wasBlocking) {
+              p.blockStartAt = this.now;
+            }
+            stepPlayerPhysics(p, botInput, dt, ARENA_BOXES, JUMP_PADS);
+          }
         }
       } else {
         p.tickBudget = Math.min(6, p.tickBudget + 1.12);
@@ -1569,6 +1592,7 @@ export class GameRoom {
       hostId: this.ensureHostId(),
       managerId: this.ensureManagerId(),
       mode: this.mode,
+      botDifficulty: this.botDifficulty,
       matchState: this.matchState,
       matchTimeLeft: r2(this.matchTimeLeft),
       intermissionTimer: r2(this.intermissionTimer),
@@ -1598,6 +1622,7 @@ export class GameRoom {
     this.hostId = cp.hostId || null;
     this.managerId = cp.managerId || cp.hostId || null;
     this.mode = cp.mode || GAME_MODES.FFA;
+    this.botDifficulty = normalizeBotDifficulty(cp.botDifficulty);
     this.matchState = cp.matchState || 'playing';
     this.matchTimeLeft = typeof cp.matchTimeLeft === 'number' ? cp.matchTimeLeft : MATCH_DURATION_SEC;
     this.intermissionTimer = Number(cp.intermissionTimer) || 0;
@@ -1726,7 +1751,7 @@ export class GameRoom {
         };
         this.players.set(restored.id, restored);
         if (restored.isBot) {
-          this.bots.set(restored.id, new BotController(restored.id));
+          this.bots.set(restored.id, new BotController(restored.id, this.botDifficulty));
         }
       }
     }
@@ -1799,6 +1824,7 @@ export class GameRoom {
       hi: this.ensureHostId(),
       mi: this.ensureManagerId(),
       md: this.mode,
+      bd: this.botDifficulty,
       ms: this.matchState,
       mt: Math.ceil(this.matchTimeLeft),
       ts: this.teamScores,

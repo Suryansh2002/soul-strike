@@ -87,6 +87,7 @@ export class HudUI {
       btnToggleMode: document.getElementById('btn-toggle-mode'),
       btnResetMatch: document.getElementById('btn-reset-match'),
     };
+    this.botDiffBtns = typeof document !== 'undefined' ? [...document.querySelectorAll('.bot-diff-btn')] : [];
 
     this.renderEmoteTray();
     this.bindEvents();
@@ -160,6 +161,16 @@ export class HudUI {
     const v = Number(mult || 1).toFixed(1);
     if (this.el.touchSensSlider) this.el.touchSensSlider.value = v;
     if (this.el.touchSensVal) this.el.touchSensVal.textContent = `${v}x`;
+  }
+
+  setBotDifficultyUi(diff, canManage = true) {
+    const active = diff || 'normal';
+    for (const btn of this.botDiffBtns) {
+      const isMatch = btn.dataset.botDiff === active;
+      btn.classList.toggle('active-btn', isMatch);
+      btn.disabled = !canManage;
+      btn.classList.toggle('disabled-btn', !canManage);
+    }
   }
 
   bindEvents() {
@@ -250,6 +261,9 @@ export class HudUI {
     document.getElementById('btn-clear-bots').addEventListener('click', () => this.cb.onMatchCmd('clear_bots'));
     document.getElementById('btn-toggle-mode').addEventListener('click', () => this.cb.onToggleMode());
     document.getElementById('btn-reset-match').addEventListener('click', () => this.cb.onMatchCmd('reset_match'));
+    for (const btn of this.botDiffBtns) {
+      btn.addEventListener('click', () => this.cb.onSetBotDifficulty?.(btn.dataset.botDiff));
+    }
 
     // Single delegated listener so clicking shop buttons is never lost between snapshot updates
     this.el.shopBody.addEventListener('click', (e) => {
@@ -554,6 +568,7 @@ export class HudUI {
       btn.disabled = !canManage;
       btn.classList.toggle('disabled-btn', !canManage);
     }
+    this.setBotDifficultyUi(snap.bd || 'normal', canManage);
     if (this.el.hostSettingsNote) {
       this.el.hostSettingsNote.textContent = canManage
         ? 'Server Controls — You are the Lobby Manager'

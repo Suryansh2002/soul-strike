@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { ARENA_HALF_SIZE } from '../shared/arena.js';
-import { GAME_MODES, HOST_EVAL_INTERVAL_MS, MAX_LOBBY_PLAYERS } from '../shared/constants.js';
+import { GAME_MODES, HOST_EVAL_INTERVAL_MS, MAX_LOBBY_PLAYERS, normalizeBotDifficulty } from '../shared/constants.js';
 import { clamp, finiteNum } from '../shared/physics.js';
 import { MSG } from '../shared/protocol.js';
 
@@ -331,6 +331,7 @@ export class P2PCoordinator {
       hostId: lobby.hostId,
       managerId: lobby.managerId,
       mode: cp.mode === GAME_MODES.TDM ? GAME_MODES.TDM : GAME_MODES.FFA,
+      botDifficulty: normalizeBotDifficulty(cp.botDifficulty),
     };
 
     if (Array.isArray(cp.players)) {

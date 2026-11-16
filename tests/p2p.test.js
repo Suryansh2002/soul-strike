@@ -1,15 +1,25 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { GameRoom } from '../server/GameRoom.js';
+import { BotController } from '../server/BotController.js';
 import { P2PCoordinator } from '../server/P2PCoordinator.js';
 import { NetClient } from '../client/NetClient.js';
 import { resolveSavedPlayerName, sanitizePlayerName } from '../client/HudUI.js';
 import { InputManager } from '../client/InputManager.js';
 import { computeTouchLookDelta, evaluateMobileCombatAssist } from '../client/mobileAssist.js';
-import { FIXED_DT, GAME_MODES, MAX_LOBBY_PLAYERS, PLAYER_EYE_HEIGHT, TEAMS, WEAPONS } from '../shared/constants.js';
+import {
+  BOT_DIFFICULTIES,
+  BOT_DIFFICULTY_PROFILES,
+  FIXED_DT,
+  GAME_MODES,
+  MAX_LOBBY_PLAYERS,
+  PLAYER_EYE_HEIGHT,
+  TEAMS,
+  WEAPONS,
+} from '../shared/constants.js';
 import { ARENA_BOXES, ARENA_HALF_SIZE } from '../shared/arena.js';
 import { raycastArena } from '../shared/physics.js';
-import { MSG } from '../shared/protocol.js';
+import { EVT, MSG } from '../shared/protocol.js';
 
 function createRecordingSocket() {
   const sent = [];
@@ -1270,4 +1280,171 @@ test('Host election minimizes room-wide player-to-player latency (2 India + 1 US
   c3.sendPing();
   await waitUntil(() => (coordC.lobbies.get('lobby_1')?.peers.get('p2')?.peerRtts?.p3 || 0) > 0);
   assert.ok((coordC.lobbies.get('lobby_1')?.peers.get('p2')?.peerRtts?.p3 || 0) > 0);
+});
+
+test('Bot difficulty command gating, checkpoint preservation, and snapshot broadcast work end-to-end', () => {
+  const room = new GameRoom();
+  const ws1 = createRecordingSocket();
+  const ws2 = createRecordingSocket();
+  const p1 = room.addHumanPlayer(ws1, 'ManagerHost');
+  const p2 = room.addHumanPlayer(ws2, 'GuestPlayer');
+
+  assert.equal(room.botDifficulty, BOT_DIFFICULTIES.NORMAL);
+  const bot1 = room.addBot();
+  assert.equal(room.bots.get(bot1.id).difficulty, BOT_DIFFICULTIES.NORMAL);
+
+  // Non-manager guest cannot alter bot difficulty
+  room.handleClientMessage(p2, { t: MSG.MATCH_CMD, cmd: 'set_bot_difficulty', difficulty: BOT_DIFFICULTIES.EASY });
+  assert.equal(room.botDifficulty, BOT_DIFFICULTIES.NORMAL);
+
+  // Manager host switches bot difficulty to Easy -> updates existing & future bots
+  room.handleClientMessage(p1, { t: MSG.MATCH_CMD, cmd: 'set_bot_difficulty', difficulty: BOT_DIFFICULTIES.EASY });
+  assert.equal(room.botDifficulty, BOT_DIFFICULTIES.EASY);
+  assert.equal(room.bots.get(bot1.id).difficulty, BOT_DIFFICULTIES.EASY);
+
+  const bot2 = room.addBot();
+  assert.equal(room.bots.get(bot2.id).difficulty, BOT_DIFFICULTIES.EASY);
+
+  // Switch to Hard, verify checkpoint export, P2PCoordinator sanitize, checkpoint import, and snapshot bd
+  room.handleClientMessage(p1, { t: MSG.MATCH_CMD, cmd: 'set_bot_difficulty', difficulty: BOT_DIFFICULTIES.HARD });
+  const cp = room.exportCheckpoint();
+  assert.equal(cp.botDifficulty, BOT_DIFFICULTIES.HARD);
+
+  const coord = new P2PCoordinator();
+  const coordWs = createRecordingSocket();
+  const cpPeerId = coord.handleJoin(coordWs, { name: 'ManagerHost' });
+  const fakeLobby = coord.lobbies.get(coord.peers.get(cpPeerId).lobbyId);
+  const cleanCp = coord.sanitizeCheckpoint({ ...cp, players: [{ id: cpPeerId, name: 'ManagerHost' }, ...cp.players.filter((pl) => pl.isBot)] }, fakeLobby);
+  assert.equal(cleanCp.botDifficulty, BOT_DIFFICULTIES.HARD);
+
+  const room2 = new GameRoom();
+  const wsRestore = createRecordingSocket();
+  room2.importCheckpoint(cp, (id) => (id === p1.id ? wsRestore : null));
+  assert.equal(room2.botDifficulty, BOT_DIFFICULTIES.HARD);
+  assert.equal(room2.bots.get(bot1.id).difficulty, BOT_DIFFICULTIES.HARD);
+
+  room2.broadcastSnapshot();
+  const snap = wsRestore.sent.find((m) => m.t === MSG.SNAPSHOT);
+  assert.ok(snap);
+  assert.equal(snap.bd, BOT_DIFFICULTIES.HARD);
+});
+
+test('Bot difficulty scales reaction, spread, shop purchases, and prevents 180-degree back-shots', () => {
+  const easy = BOT_DIFFICULTY_PROFILES.easy;
+  const hard = BOT_DIFFICULTY_PROFILES.hard;
+  assert.ok(easy.reactionDelay > hard.reactionDelay);
+  assert.ok(easy.aimSpread > hard.aimSpread);
+
+  // Easy bot never buys Astral Rail and caps Vitality at rank 1
+  const room = new GameRoom();
+  room.botDifficulty = BOT_DIFFICULTIES.EASY;
+  const easyBot = room.addBot();
+  const easyCtrl = room.bots.get(easyBot.id);
+  easyBot.essence = 1500;
+  easyBot.unlockedWeapons.add('runeblade');
+  easyBot.unlockedPowers.add('fireball');
+  easyBot.unlockedPowers.add('souldrain');
+
+  easyCtrl.tryBuyUpgrades(easyBot, room);
+  easyCtrl.tryBuyUpgrades(easyBot, room);
+  assert.equal(easyBot.unlockedWeapons.has('rail'), false, 'Easy bot must not buy Astral Rail');
+  assert.equal(easyBot.runes.vitality, 1, 'Easy bot must cap Vitality at rank 1');
+
+  // Hard bot buys Astral Rail and upgrades Vitality up to rank 3
+  const hardCtrl = new BotController('b_hard', BOT_DIFFICULTIES.HARD);
+  const hardBot = room.createPlayerEntity('b_hard', 'HardBot', null, true);
+  room.players.set(hardBot.id, hardBot);
+  hardBot.essence = 2000;
+  hardBot.unlockedWeapons.add('runeblade');
+  hardBot.unlockedPowers.add('fireball');
+  hardBot.unlockedPowers.add('souldrain');
+
+  hardCtrl.tryBuyUpgrades(hardBot, room);
+  assert.equal(hardBot.unlockedWeapons.has('rail'), true, 'Hard bot should buy Astral Rail');
+  hardCtrl.tryBuyUpgrades(hardBot, room);
+  hardCtrl.tryBuyUpgrades(hardBot, room);
+  hardCtrl.tryBuyUpgrades(hardBot, room);
+  assert.equal(hardBot.runes.vitality, 3, 'Hard bot should upgrade Vitality to rank 3');
+
+  // Facing 180 degrees away from a human along unobstructed lane does not fire behind the back
+  const shooterBot = room.createPlayerEntity('b_turn', 'TurningBot', null, true);
+  const human = room.createPlayerEntity('p_human', 'Human', null, false);
+  room.players.clear();
+  room.bots.clear();
+  room.players.set(shooterBot.id, shooterBot);
+  room.players.set(human.id, human);
+  const turnCtrl = new BotController(shooterBot.id, BOT_DIFFICULTIES.HARD);
+  room.bots.set(shooterBot.id, turnCtrl);
+
+  shooterBot.x = -19.5;
+  shooterBot.y = 0;
+  shooterBot.z = 8.0;
+  shooterBot.yaw = Math.PI; // facing +Z, directly away from human at z=-4.0
+  shooterBot.pitch = 0;
+  human.x = -19.5;
+  human.y = 0;
+  human.z = -4.0;
+  turnCtrl.attackCd = 0;
+
+  const hpBefore = human.hp;
+  turnCtrl.step(shooterBot, room, FIXED_DT);
+  assert.equal(human.hp, hpBefore, 'bot facing away must not 180-flick shoot before turning toward target');
+});
+
+test('Bots roast human players on kill and on block/parry with emotes and physical actions', () => {
+  const room = new GameRoom();
+  const bot = room.addBot();
+  const botCtrl = room.bots.get(bot.id);
+  const human = room.addHumanPlayer(createRecordingSocket(), 'HumanVictim');
+
+  bot.x = 0;
+  bot.y = 2;
+  bot.z = 2;
+  human.x = 0;
+  human.y = 2;
+  human.z = -2;
+
+  // 1. Killing a human triggers roast emote + active roastTimer + physical roast actions
+  room.pendingEvents = [];
+  room.applyDamage(bot, human, 500, 'Arcane Bolt', false, { x: 0, y: 0, z: -1 }, { x: human.x, y: human.y + 1, z: human.z }, false, true);
+  assert.equal(human.alive, false);
+  assert.ok(
+    room.pendingEvents.some((ev) => ev.kind === EVT.EMOTE && ev.fromId === bot.id),
+    'bot killing a human must trigger a roast emote'
+  );
+  assert.ok(botCtrl.roastTimer > 0, 'bot must enter active physical roast state after killing a human');
+
+  // Verify all 3 roast styles execute physical movement/shield/look actions without errors
+  for (const style of ['spin_flex', 'shield_tbag', 'nod_stare']) {
+    botCtrl.roastTimer = 1.0;
+    botCtrl.roastPhase = 0;
+    botCtrl.roastStyle = style;
+    const prevYaw = bot.yaw;
+    const tick1 = botCtrl.step(bot, room, FIXED_DT);
+    const tick2 = botCtrl.step(bot, room, 0.05);
+    assert.equal(tick1.moveX, 0);
+    assert.equal(tick1.moveZ, 0);
+    if (style === 'spin_flex') {
+      assert.notEqual(tick1.yaw, prevYaw);
+      assert.equal(tick1.jump, true);
+    } else if (style === 'shield_tbag') {
+      assert.ok(tick1.pitch < 0);
+      assert.equal(tick1.jump, true);
+    } else if (style === 'nod_stare') {
+      assert.notEqual(tick2.pitch, tick1.pitch);
+    }
+  }
+
+  // 2. Parrying a human triggers shield-wiggle taunt + emote
+  room.now += 5000;
+  room.pendingEvents = [];
+  botCtrl.roastTimer = 0;
+  botCtrl.tauntCd = 0;
+  botCtrl.wiggleTimer = 0;
+  botCtrl.onBlockedOrParriedHuman(bot, human, room, true);
+  assert.ok(botCtrl.wiggleTimer > 0);
+  assert.ok(
+    room.pendingEvents.some((ev) => ev.kind === EVT.EMOTE && ev.fromId === bot.id),
+    'bot parrying a human should trigger a taunt emote'
+  );
 });

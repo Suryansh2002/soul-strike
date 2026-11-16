@@ -161,6 +161,14 @@ const hud = new HudUI({
     }
     net.send({ t: MSG.MATCH_CMD, cmd });
   },
+  onSetBotDifficulty(difficulty) {
+    if (!net.canManageServer()) {
+      hud.showEmoteToast('ONLY THE LOBBY HOST CAN MANAGE SERVER SETTINGS');
+      return;
+    }
+    net.send({ t: MSG.MATCH_CMD, cmd: 'set_bot_difficulty', difficulty });
+    hud.showEmoteToast(`BOT AI: ${String(difficulty || 'normal').toUpperCase()}`);
+  },
   onToggleMode() {
     if (!net.canManageServer()) {
       hud.showEmoteToast('ONLY THE LOBBY HOST CAN MANAGE SERVER SETTINGS');

@@ -259,3 +259,77 @@ export const EMOTES = {
   spin: { id: 'spin', key: '8', name: 'Spin', color: '#0ea5e9', duration: 1.8 },
   bow: { id: 'bow', key: '9', name: 'Salute', color: '#ec4899', duration: 1.9 },
 };
+
+export const BOT_DIFFICULTIES = {
+  EASY: 'easy',
+  NORMAL: 'normal',
+  HARD: 'hard',
+};
+
+export const BOT_DIFFICULTY_PROFILES = {
+  easy: {
+    label: 'Easy',
+    turnSpeed: 4.0,
+    aimSpread: 0.165,
+    aimHeightOffset: 0.88,
+    maxFireAngle: 0.34,
+    reactionDelay: 0.45,
+    attackDelayMin: 0.5,
+    attackDelayMax: 0.88,
+    moveSpeedScale: 0.82,
+    jumpChance: 0.005,
+    dashChance: 0.008,
+    blockChance: 0.1,
+    spellChance: 0.12,
+    buyInterval: 8.0,
+    allowRail: false,
+    maxVitalityRank: 1,
+    roastChance: 0.65,
+  },
+  normal: {
+    label: 'Normal',
+    turnSpeed: 6.0,
+    aimSpread: 0.095,
+    aimHeightOffset: 1.0,
+    maxFireAngle: 0.26,
+    reactionDelay: 0.24,
+    attackDelayMin: 0.25,
+    attackDelayMax: 0.48,
+    moveSpeedScale: 0.94,
+    jumpChance: 0.01,
+    dashChance: 0.022,
+    blockChance: 0.22,
+    spellChance: 0.24,
+    buyInterval: 5.5,
+    allowRail: true,
+    maxVitalityRank: 2,
+    roastChance: 0.8,
+  },
+  hard: {
+    label: 'Hard',
+    turnSpeed: 8.8,
+    aimSpread: 0.045,
+    aimHeightOffset: 1.24,
+    maxFireAngle: 0.2,
+    reactionDelay: 0.08,
+    attackDelayMin: 0.12,
+    attackDelayMax: 0.24,
+    moveSpeedScale: 1.0,
+    jumpChance: 0.016,
+    dashChance: 0.045,
+    blockChance: 0.38,
+    spellChance: 0.38,
+    buyInterval: 3.2,
+    allowRail: true,
+    maxVitalityRank: 3,
+    roastChance: 0.95,
+  },
+};
+
+export function normalizeBotDifficulty(val) {
+  const key = typeof val === 'string' ? val.trim().toLowerCase() : '';
+  if (key === BOT_DIFFICULTIES.EASY) return BOT_DIFFICULTIES.EASY;
+  if (key === BOT_DIFFICULTIES.HARD) return BOT_DIFFICULTIES.HARD;
+  if (key === BOT_DIFFICULTIES.NORMAL || key === 'medium') return BOT_DIFFICULTIES.NORMAL;
+  return BOT_DIFFICULTIES.NORMAL;
+}
