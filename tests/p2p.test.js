@@ -1030,6 +1030,30 @@ test('First joiner stays Menu Manager while simulation host smoothly hands over 
   assert.equal(coord.hostId, p2, 'lowest-latency peer p2 must become simulation host');
   assert.equal(coord.managerId, p1, 'first joiner p1 must remain Lobby Menu Manager');
 
+  // Re-evaluating host after handover (even with symmetric peerRtts and probeTs echo) must NOT ping-pong back to p1
+  coord.handleMessage(p1, {
+    t: MSG.P2P_LATENCY,
+    probeTs: 12345,
+    rtt: 190,
+    jitter: 35,
+    fps: 60,
+    peerRtts: { [p2]: 190 },
+  });
+  assert.equal(ws1.sent.some((m) => m.t === MSG.P2P_LATENCY && m.probeTs === 12345), true);
+  assert.equal(coord.evaluateLobbyBestHost('lobby_1', { immediate: true, force: true }), null);
+  assert.equal(coord.hostId, p2, 'host must stay settled on p2 without ping-ponging back to p1');
+
+  // Within hysteresis threshold (45ms vs 38ms in 2-player lobby), host remains stable
+  const coordStable = new P2PCoordinator({ hostEvalIntervalMs: 0 });
+  const sws1 = createRecordingSocket();
+  const sws2 = createRecordingSocket();
+  const sp1 = coordStable.handleJoin(sws1, { name: 'PeerOne' });
+  const sp2 = coordStable.handleJoin(sws2, { name: 'PeerTwo' });
+  coordStable.handleMessage(sp1, { t: MSG.P2P_LATENCY, rtt: 45, jitter: 2, fps: 60 });
+  coordStable.handleMessage(sp2, { t: MSG.P2P_LATENCY, rtt: 38, jitter: 2, fps: 60, peerRtts: { [sp1]: 55 } });
+  assert.equal(coordStable.evaluateLobbyBestHost('lobby_1', { immediate: true, force: true }), null);
+  assert.equal(coordStable.hostId, sp1);
+
   const mig1 = ws1.sent.find((m) => m.t === MSG.P2P_HOST_MIGRATE);
   const mig2 = ws2.sent.find((m) => m.t === MSG.P2P_HOST_MIGRATE);
   const mig3 = ws3.sent.find((m) => m.t === MSG.P2P_HOST_MIGRATE);

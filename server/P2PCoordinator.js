@@ -167,30 +167,23 @@ export class P2PCoordinator {
 
   computePeerLatencyScore(lobby, candidate) {
     if (!lobby || !candidate) return null;
+    if (candidate.rtt === null || candidate.rtt <= 0) return null;
+
+    const selfCost =
+      candidate.rtt + finiteNum(candidate.jitter, 0) * 1.5 + (candidate.fps < 30 ? 60 : 0);
+
+    const directPeerRtts = [];
     const peerRtts = candidate.peerRtts || {};
-    if (candidate.rtt === null && Object.keys(peerRtts).length === 0) {
-      return null;
+    for (const [targetId, rttVal] of Object.entries(peerRtts)) {
+      if (targetId !== candidate.id && lobby.peers.has(targetId) && rttVal > 0) {
+        directPeerRtts.push(rttVal);
+      }
     }
+    if (directPeerRtts.length === 0) return selfCost;
 
-    let otherCount = 0;
-    let sumRtt = 0;
-    let maxRtt = 0;
-
-    for (const other of lobby.peers.values()) {
-      if (other.id === candidate.id) continue;
-      otherCount++;
-      const fallbackPair = (finiteNum(candidate.rtt, 80) + finiteNum(other.rtt, 80)) * 0.5;
-      const pairRtt =
-        peerRtts[other.id] ?? other.peerRtts?.[candidate.id] ?? fallbackPair;
-      sumRtt += pairRtt;
-      if (pairRtt > maxRtt) maxRtt = pairRtt;
-    }
-
-    const avgRtt = otherCount > 0 ? sumRtt / otherCount : finiteNum(candidate.rtt, 50);
-    if (otherCount === 0) maxRtt = avgRtt;
-    const fpsPenalty = candidate.fps < 30 ? 50 : 0;
-
-    return avgRtt * 0.7 + maxRtt * 0.3 + finiteNum(candidate.jitter, 0) * 1.2 + fpsPenalty;
+    const avgDirectPeerRtt =
+      directPeerRtts.reduce((sum, v) => sum + v, 0) / directPeerRtts.length;
+    return selfCost * 0.75 + avgDirectPeerRtt * 0.25;
   }
 
   _pickBestHostCandidate(lobby) {
@@ -224,7 +217,7 @@ export class P2PCoordinator {
     const lobby = typeof lobbyOrId === 'string' ? this.lobbies.get(lobbyOrId) : lobbyOrId;
     if (!lobby || lobby.peers.size < 2) return null;
     if (lobby.pendingHandoverTargetId) return null;
-    if (!force && Date.now() - (lobby.lastHostSwitchAt || 0) < 4500) return null;
+    if (!force && Date.now() - (lobby.lastHostSwitchAt || 0) < 15000) return null;
 
     let bestPeer = null;
     let bestScore = Infinity;
@@ -239,7 +232,8 @@ export class P2PCoordinator {
 
     const currentHost = lobby.peers.get(lobby.hostId);
     const currentScore = currentHost ? this.computePeerLatencyScore(lobby, currentHost) : null;
-    if (currentScore !== null && bestScore + 10 >= currentScore) {
+    if (currentScore === null && !force) return null;
+    if (currentScore !== null && !(bestScore + 25 < currentScore && bestScore < currentScore * 0.78)) {
       return null;
     }
 
@@ -280,6 +274,9 @@ export class P2PCoordinator {
     lobby.hostId = newHostId;
     lobby.hostToken = generateToken();
     lobby.lastHostSwitchAt = Date.now();
+    for (const p of lobby.peers.values()) {
+      p.peerRtts = {};
+    }
 
     if (lobby.latestCheckpoint && typeof lobby.latestCheckpoint === 'object') {
       lobby.latestCheckpoint = {
@@ -442,8 +439,15 @@ export class P2PCoordinator {
     peer.lastSeenAt = Date.now();
 
     if (msg.t === MSG.P2P_LATENCY) {
-      if (msg.rtt !== undefined && msg.rtt !== null) {
-        peer.rtt = clamp(finiteNum(msg.rtt, 60), 1, 2000);
+      if (typeof msg.probeTs === 'number' && Number.isFinite(msg.probeTs)) {
+        this._send(peer.ws, {
+          t: MSG.P2P_LATENCY,
+          probeTs: msg.probeTs,
+        });
+      }
+      const parsedRtt = finiteNum(msg.rtt, 0);
+      if (parsedRtt > 0) {
+        peer.rtt = clamp(parsedRtt, 1, 2000);
       }
       if (msg.jitter !== undefined && msg.jitter !== null) {
         peer.jitter = clamp(finiteNum(msg.jitter, 0), 0, 1000);

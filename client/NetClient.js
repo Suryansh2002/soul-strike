@@ -41,6 +41,9 @@ export class NetClient {
     this.rtt = 0;
     this.jitter = 0;
     this.lastRtt = 0;
+    this.serverRtt = 0;
+    this.serverJitter = 0;
+    this.lastServerRtt = 0;
     this.serverTimeOffset = 0; // estimatedServerTime = performance.now() + serverTimeOffset
     this.hasClockSync = false;
 
@@ -351,6 +354,9 @@ export class NetClient {
     this.isHost = true;
     this.hostId = this.playerId;
     this.transportMode = 'host';
+    this.rtt = 0;
+    this.jitter = 0;
+    this.lastRtt = 0;
     this.hasClockSync = false;
 
     const engine = new BrowserHostEngine({ forceInProcess: Boolean(this.opts.forceInProcessHost) });
@@ -489,12 +495,25 @@ export class NetClient {
       return;
     }
 
+    if (msg.t === MSG.P2P_LATENCY && typeof msg.probeTs === 'number') {
+      const sampleServerRtt = Math.max(1, performance.now() - msg.probeTs);
+      this.serverJitter = this.lastServerRtt
+        ? this.serverJitter * 0.75 + Math.abs(sampleServerRtt - this.lastServerRtt) * 0.25
+        : 0;
+      this.lastServerRtt = sampleServerRtt;
+      this.serverRtt = this.serverRtt ? this.serverRtt * 0.7 + sampleServerRtt * 0.3 : sampleServerRtt;
+      return;
+    }
+
     if (msg.t === MSG.P2P_HOST_MIGRATE) {
       const prevHostId = msg.prevHostId || this.hostId;
       this.lobbyId = msg.lobbyId || this.lobbyId;
       this.hostId = msg.newHostId;
       this.managerId = msg.managerId || this.managerId;
       this.hostToken = msg.hostToken || (this.playerId === msg.newHostId ? this.hostToken : null);
+      this.rtt = 0;
+      this.jitter = 0;
+      this.lastRtt = 0;
       this.hasClockSync = false;
 
       if (Array.isArray(msg.peers)) {
@@ -566,15 +585,6 @@ export class NetClient {
           ? this.serverTimeOffset * 0.8 + estOffset * 0.2
           : estOffset;
         this.hasClockSync = true;
-      }
-      if (!this.isHost && this.hostId) {
-        this._sendSignal({
-          t: MSG.P2P_LATENCY,
-          rtt: Math.max(1, Math.round(this.rtt)),
-          jitter: Math.round(this.jitter),
-          fps: Math.round(this.fps || 60),
-          peerRtts: { [this.hostId]: Math.max(1, Math.round(this.rtt)) },
-        });
       }
       return;
     }
@@ -699,20 +709,33 @@ export class NetClient {
     this.authToken = null;
     this.hostToken = null;
     this.playerId = null;
+    this.rtt = 0;
+    this.jitter = 0;
+    this.lastRtt = 0;
+    this.serverRtt = 0;
+    this.serverJitter = 0;
+    this.lastServerRtt = 0;
     this.knownPeers.clear();
     this.pendingReliableOutbox = [];
   }
 
   sendPing() {
     if (!this.playerId || !this.hostId) return;
-    if (this.isHost) {
-      this._sendSignal({
-        t: MSG.P2P_LATENCY,
-        rtt: Math.max(1, Math.round(this.rtt || 8)),
-        jitter: Math.round(this.jitter || 1),
-        fps: Math.round(this.fps || 60),
-      });
+    const latencyReport = {
+      t: MSG.P2P_LATENCY,
+      probeTs: performance.now(),
+      fps: Math.round(this.fps || 60),
+    };
+    if (this.serverRtt > 0 || (!this.isHost && this.rtt > 0)) {
+      const rttVal = this.serverRtt > 0 ? this.serverRtt : this.rtt;
+      const jitterVal = this.serverRtt > 0 ? this.serverJitter : this.jitter;
+      latencyReport.rtt = Math.max(1, Math.round(rttVal));
+      latencyReport.jitter = Math.round(jitterVal);
     }
+    if (!this.isHost && this.rtt > 0) {
+      latencyReport.peerRtts = { [this.hostId]: Math.max(1, Math.round(this.rtt)) };
+    }
+    this._sendSignal(latencyReport);
     this.send({ t: MSG.PING, c: performance.now() });
   }
 
