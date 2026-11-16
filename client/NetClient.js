@@ -34,6 +34,7 @@ export class NetClient {
 
     this.hostEngine = null;
     this.peerConnections = new Map();
+    this.peerRtts = new Map();
     this.knownPeers = new Map();
     this.latestCheckpoint = null;
     this.pendingReliableOutbox = [];
@@ -99,6 +100,32 @@ export class NetClient {
     }
   }
 
+  _hasActivePeerConnection(peerId) {
+    const rec = this.peerConnections.get(peerId);
+    return Boolean(
+      rec && rec.pc && rec.pc.connectionState !== 'failed' && rec.pc.connectionState !== 'closed'
+    );
+  }
+
+  _sendToPeerChannel(peerId, obj, fast = true) {
+    const rec = this.peerConnections.get(peerId);
+    if (!rec) return false;
+    const raw = JSON.stringify(obj);
+    if (fast && rec.fastDc?.readyState === 'open') {
+      try {
+        rec.fastDc.send(raw);
+        return true;
+      } catch {}
+    }
+    if (rec.reliableDc?.readyState === 'open') {
+      try {
+        rec.reliableDc.send(raw);
+        return true;
+      } catch {}
+    }
+    return false;
+  }
+
   _updateGuestTransportMode() {
     if (this.isHost) {
       this.transportMode = 'host';
@@ -137,6 +164,18 @@ export class NetClient {
       return;
     }
     if (!msg || typeof msg !== 'object') return;
+
+    if (msg.t === MSG.PEER_PING && typeof msg.c === 'number') {
+      this._sendToPeerChannel(fromId, { t: MSG.PEER_PONG, c: msg.c }, true);
+      return;
+    }
+
+    if (msg.t === MSG.PEER_PONG && typeof msg.c === 'number') {
+      const sample = Math.max(1, performance.now() - msg.c);
+      const prev = this.peerRtts.get(fromId) || 0;
+      this.peerRtts.set(fromId, prev > 0 ? prev * 0.7 + sample * 0.3 : sample);
+      return;
+    }
 
     if (this.isHost) {
       if (
@@ -226,7 +265,7 @@ export class NetClient {
 
     if (msg.desc) {
       if (msg.desc.type === 'offer') {
-        if (this.isHost || msg.fromId !== this.hostId) return;
+        if (!this.knownPeers.has(msg.fromId) && msg.fromId !== this.hostId) return;
         this._closePeerConnection(msg.fromId);
 
         let pc;
@@ -349,7 +388,12 @@ export class NetClient {
       this.hostEngine.stop();
       this.hostEngine = null;
     }
-    this._closeAllPeerConnections();
+    for (const pid of [...this.peerConnections.keys()]) {
+      if (!this.knownPeers.has(pid)) {
+        this._closePeerConnection(pid);
+        this.peerRtts.delete(pid);
+      }
+    }
 
     this.isHost = true;
     this.hostId = this.playerId;
@@ -379,7 +423,7 @@ export class NetClient {
 
     for (const peer of this.knownPeers.values()) {
       engine.addOrAttachPeer(peer.peerId, peer.name, peer.team);
-      if (peer.peerId !== this.playerId) {
+      if (peer.peerId !== this.playerId && !this._hasActivePeerConnection(peer.peerId)) {
         this._initiateWebRtcOffer(peer.peerId);
       }
     }
@@ -436,6 +480,8 @@ export class NetClient {
       this.knownPeers.set(msg.peerId, { peerId: msg.peerId, name: msg.name, team: msg.team });
       if (this.isHost && this.hostEngine && msg.peerId !== this.playerId) {
         this.hostEngine.addOrAttachPeer(msg.peerId, msg.name, msg.team);
+      }
+      if (msg.peerId !== this.playerId) {
         this._initiateWebRtcOffer(msg.peerId);
       }
       return;
@@ -444,6 +490,7 @@ export class NetClient {
     if (msg.t === MSG.P2P_PEER_LEFT) {
       if (msg.managerId) this.managerId = msg.managerId;
       this.knownPeers.delete(msg.peerId);
+      this.peerRtts.delete(msg.peerId);
       this._closePeerConnection(msg.peerId);
       if (this.isHost && this.hostEngine) {
         this.hostEngine.removePeer(msg.peerId);
@@ -540,8 +587,15 @@ export class NetClient {
         };
       }
 
-      if (prevHostId && prevHostId !== this.playerId) {
+      if (prevHostId && prevHostId !== this.playerId && !this.knownPeers.has(prevHostId)) {
         this._closePeerConnection(prevHostId);
+        this.peerRtts.delete(prevHostId);
+      }
+      for (const pid of [...this.peerConnections.keys()]) {
+        if (!this.knownPeers.has(pid)) {
+          this._closePeerConnection(pid);
+          this.peerRtts.delete(pid);
+        }
       }
 
       if (this.playerId === msg.newHostId) {
@@ -551,9 +605,8 @@ export class NetClient {
           this.hostEngine.stop();
           this.hostEngine = null;
         }
-        this._closeAllPeerConnections();
         this.isHost = false;
-        this.transportMode = 'p2p-relay';
+        this._updateGuestTransportMode();
         this.sendPing();
       }
 
@@ -715,15 +768,23 @@ export class NetClient {
     this.serverRtt = 0;
     this.serverJitter = 0;
     this.lastServerRtt = 0;
+    this.peerRtts.clear();
     this.knownPeers.clear();
     this.pendingReliableOutbox = [];
   }
 
   sendPing() {
     if (!this.playerId || !this.hostId) return;
+    const now = performance.now();
+    for (const peerId of this.knownPeers.keys()) {
+      if (peerId !== this.playerId) {
+        this._sendToPeerChannel(peerId, { t: MSG.PEER_PING, c: now }, true);
+      }
+    }
+
     const latencyReport = {
       t: MSG.P2P_LATENCY,
-      probeTs: performance.now(),
+      probeTs: now,
       fps: Math.round(this.fps || 60),
     };
     if (this.serverRtt > 0 || (!this.isHost && this.rtt > 0)) {
@@ -732,9 +793,22 @@ export class NetClient {
       latencyReport.rtt = Math.max(1, Math.round(rttVal));
       latencyReport.jitter = Math.round(jitterVal);
     }
-    if (!this.isHost && this.rtt > 0) {
-      latencyReport.peerRtts = { [this.hostId]: Math.max(1, Math.round(this.rtt)) };
+
+    const peerRtts = {};
+    for (const peerId of this.knownPeers.keys()) {
+      if (peerId === this.playerId) continue;
+      const measured = this.peerRtts.get(peerId);
+      if (measured > 0) {
+        peerRtts[peerId] = Math.max(1, Math.round(measured));
+      }
     }
+    if (!this.isHost && this.rtt > 0 && !peerRtts[this.hostId]) {
+      peerRtts[this.hostId] = Math.max(1, Math.round(this.rtt));
+    }
+    if (Object.keys(peerRtts).length > 0) {
+      latencyReport.peerRtts = peerRtts;
+    }
+
     this._sendSignal(latencyReport);
     this.send({ t: MSG.PING, c: performance.now() });
   }

@@ -926,9 +926,11 @@ test('Server authorization and sanitization block Infinity/NaN inputs, relay spo
   assert.equal(ws1.sent.some((m) => m.t === MSG.P2P_RELAY), false);
   assert.equal(ws3.sent.some((m) => m.t === MSG.P2P_RELAY), false);
 
-  // Guest cannot send WebRTC P2P_SIGNAL directly to another non-host guest
+  // Same-lobby guests can signal each other for WebRTC mesh RTT probing, while external/non-existent peers are dropped
   coord.handleMessage(p2, { t: MSG.P2P_SIGNAL, toId: p3, desc: { type: 'offer', sdp: 'x' } });
-  assert.equal(ws3.sent.some((m) => m.t === MSG.P2P_SIGNAL), false);
+  assert.equal(ws3.sent.some((m) => m.t === MSG.P2P_SIGNAL && m.fromId === p2), true);
+  coord.handleMessage(p2, { t: MSG.P2P_SIGNAL, toId: 'non_existent_peer', desc: { type: 'offer', sdp: 'y' } });
+  assert.equal(ws1.sent.some((m) => m.t === MSG.P2P_SIGNAL && m.toId === 'non_existent_peer'), false);
 
   // Guest or host with wrong hostToken cannot inject checkpoint
   coord.handleMessage(p2, { t: MSG.P2P_CHECKPOINT, checkpoint: { seq: 99, players: [] } });
@@ -1163,4 +1165,109 @@ test('Reconciled shooter origin and multi-sample lag compensation register hits 
   shooter.z = 9.5;
   const wallBlockedEye = room._resolveReconciledEye(shooter, { sx: 9.0, sy: 0, sz: 9.5 });
   assert.equal(wallBlockedEye.x, 7.8, 'cannot reconcile shooter origin through a solid wall');
+});
+
+test('Host election minimizes room-wide player-to-player latency (2 India + 1 USA and 1 India + 1 EU + 1 USA centroid)', async (t) => {
+  // Part A: 2 India + 1 USA while signaling server is in USA (p1 USA has 25ms server RTT, p2/p3 India have 220ms)
+  const coordA = new P2PCoordinator({ hostEvalIntervalMs: 0 });
+  const wsA1 = createRecordingSocket();
+  const wsA2 = createRecordingSocket();
+  const wsA3 = createRecordingSocket();
+  const a1 = coordA.handleJoin(wsA1, { name: 'USA_Player' });
+  const a2 = coordA.handleJoin(wsA2, { name: 'India_One' });
+  const a3 = coordA.handleJoin(wsA3, { name: 'India_Two' });
+
+  coordA.handleMessage(a1, {
+    t: MSG.P2P_LATENCY,
+    rtt: 25,
+    jitter: 2,
+    fps: 60,
+    peerRtts: { [a2]: 220, [a3]: 225 },
+  });
+  coordA.handleMessage(a2, {
+    t: MSG.P2P_LATENCY,
+    rtt: 220,
+    jitter: 2,
+    fps: 60,
+    peerRtts: { [a1]: 220, [a3]: 24 },
+  });
+  coordA.handleMessage(a3, {
+    t: MSG.P2P_LATENCY,
+    rtt: 225,
+    jitter: 3,
+    fps: 60,
+    peerRtts: { [a1]: 225, [a2]: 24 },
+  });
+
+  const electedIndia = coordA.evaluateLobbyBestHost('lobby_1', { immediate: true, force: true });
+  assert.equal(electedIndia, a2, 'India peer p2 minimizes room-wide player-to-player latency for 2 India + 1 USA');
+  assert.equal(coordA.hostId, a2);
+  assert.equal(coordA.managerId, a1, 'first joiner stays Menu Manager');
+
+  // Part B: 1 India + 1 Europe + 1 USA -> Europe bridge peer minimizes both mean & max latency across all players
+  const coordB = new P2PCoordinator({ hostEvalIntervalMs: 0 });
+  const b1 = coordB.handleJoin(createRecordingSocket(), { name: 'India_Peer' });
+  const b2 = coordB.handleJoin(createRecordingSocket(), { name: 'Europe_Bridge' });
+  const b3 = coordB.handleJoin(createRecordingSocket(), { name: 'USA_Peer' });
+
+  coordB.handleMessage(b1, { t: MSG.P2P_LATENCY, rtt: 90, jitter: 2, fps: 60, peerRtts: { [b2]: 105, [b3]: 230 } });
+  coordB.handleMessage(b2, { t: MSG.P2P_LATENCY, rtt: 90, jitter: 2, fps: 60, peerRtts: { [b1]: 105, [b3]: 85 } });
+  coordB.handleMessage(b3, { t: MSG.P2P_LATENCY, rtt: 90, jitter: 2, fps: 60, peerRtts: { [b1]: 230, [b2]: 85 } });
+
+  const electedCentroid = coordB.evaluateLobbyBestHost('lobby_1', { immediate: true, force: true });
+  assert.equal(electedCentroid, b2, 'centroid Europe peer minimizes both average and worst-case latency');
+  assert.equal(coordB.hostId, b2);
+
+  // Part C: 3-client NetClient WebRTC mesh establishes guest-to-guest channels, measures peerRtts, and reports to coordinator
+  const coordC = new P2PCoordinator({ hostEvalIntervalMs: 0 });
+  const { HubWebSocket } = createHubSocketFactory(coordC);
+  const MockRTC = createPairedRtcClass();
+
+  const c1 = new NetClient({
+    WebSocketImpl: HubWebSocket,
+    RTCPeerConnectionImpl: MockRTC,
+    forceInProcessHost: true,
+    url: 'ws://mock',
+  });
+  const c2 = new NetClient({
+    WebSocketImpl: HubWebSocket,
+    RTCPeerConnectionImpl: MockRTC,
+    forceInProcessHost: true,
+    url: 'ws://mock',
+  });
+  const c3 = new NetClient({
+    WebSocketImpl: HubWebSocket,
+    RTCPeerConnectionImpl: MockRTC,
+    forceInProcessHost: true,
+    url: 'ws://mock',
+  });
+
+  t.after(() => {
+    c1.disconnect();
+    c2.disconnect();
+    c3.disconnect();
+  });
+
+  c1.connect('PeerOne');
+  await waitUntil(() => c1.isHost && c1.playerId === 'p1');
+  c2.connect('PeerTwo');
+  await waitUntil(() => c2.playerId === 'p2' && c2.transportMode === 'p2p-udp');
+  c3.connect('PeerThree');
+  await waitUntil(
+    () =>
+      c3.playerId === 'p3' &&
+      c3.transportMode === 'p2p-udp' &&
+      c2.peerConnections.get('p3')?.fastDc?.readyState === 'open' &&
+      c3.peerConnections.get('p2')?.fastDc?.readyState === 'open'
+  );
+
+  c1.sendPing();
+  c2.sendPing();
+  c3.sendPing();
+  await waitUntil(() => c2.peerRtts.has('p3') && c3.peerRtts.has('p2'));
+
+  c2.sendPing();
+  c3.sendPing();
+  await waitUntil(() => (coordC.lobbies.get('lobby_1')?.peers.get('p2')?.peerRtts?.p3 || 0) > 0);
+  assert.ok((coordC.lobbies.get('lobby_1')?.peers.get('p2')?.peerRtts?.p3 || 0) > 0);
 });

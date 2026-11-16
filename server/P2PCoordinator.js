@@ -165,25 +165,45 @@ export class P2PCoordinator {
     }
   }
 
+  _getPairwiseRtt(candidate, otherPeer) {
+    const d1 = candidate.peerRtts?.[otherPeer.id];
+    const d2 = otherPeer.peerRtts?.[candidate.id];
+    if (d1 > 0 && d2 > 0) return (d1 + d2) * 0.5;
+    if (d1 > 0) return d1;
+    if (d2 > 0) return d2;
+    if (candidate.rtt > 0 && otherPeer.rtt > 0) return (candidate.rtt + otherPeer.rtt) * 0.5;
+    if (candidate.rtt > 0) return candidate.rtt;
+    return null;
+  }
+
   computePeerLatencyScore(lobby, candidate) {
     if (!lobby || !candidate) return null;
-    if (candidate.rtt === null || candidate.rtt <= 0) return null;
+    const hasDirectPeers = Boolean(candidate.peerRtts && Object.keys(candidate.peerRtts).length > 0);
+    if ((candidate.rtt === null || candidate.rtt <= 0) && !hasDirectPeers) return null;
 
-    const selfCost =
-      candidate.rtt + finiteNum(candidate.jitter, 0) * 1.5 + (candidate.fps < 30 ? 60 : 0);
+    const jitterCost = finiteNum(candidate.jitter, 0) * 1.5;
+    const fpsPenalty = candidate.fps < 30 ? 60 : 0;
 
-    const directPeerRtts = [];
-    const peerRtts = candidate.peerRtts || {};
-    for (const [targetId, rttVal] of Object.entries(peerRtts)) {
-      if (targetId !== candidate.id && lobby.peers.has(targetId) && rttVal > 0) {
-        directPeerRtts.push(rttVal);
+    const pairRtts = [];
+    for (const other of lobby.peers.values()) {
+      if (other.id === candidate.id) continue;
+      const rtt = this._getPairwiseRtt(candidate, other);
+      if (rtt !== null && rtt > 0) {
+        pairRtts.push(rtt);
       }
     }
-    if (directPeerRtts.length === 0) return selfCost;
 
-    const avgDirectPeerRtt =
-      directPeerRtts.reduce((sum, v) => sum + v, 0) / directPeerRtts.length;
-    return selfCost * 0.75 + avgDirectPeerRtt * 0.25;
+    if (pairRtts.length === 0) {
+      if (candidate.rtt === null || candidate.rtt <= 0) return null;
+      return candidate.rtt + jitterCost + fpsPenalty;
+    }
+
+    const meanPeerRtt = pairRtts.reduce((sum, v) => sum + v, 0) / pairRtts.length;
+    const maxPeerRtt = Math.max(...pairRtts);
+    const roomRttCost = meanPeerRtt * 0.8 + maxPeerRtt * 0.2;
+    const serverTieBreaker = (typeof candidate.rtt === 'number' && candidate.rtt > 0 ? candidate.rtt : meanPeerRtt) * 0.1;
+
+    return roomRttCost + jitterCost + fpsPenalty + serverTieBreaker;
   }
 
   _pickBestHostCandidate(lobby) {
@@ -274,9 +294,6 @@ export class P2PCoordinator {
     lobby.hostId = newHostId;
     lobby.hostToken = generateToken();
     lobby.lastHostSwitchAt = Date.now();
-    for (const p of lobby.peers.values()) {
-      p.peerRtts = {};
-    }
 
     if (lobby.latestCheckpoint && typeof lobby.latestCheckpoint === 'object') {
       lobby.latestCheckpoint = {
@@ -468,8 +485,8 @@ export class P2PCoordinator {
 
     if (msg.t === MSG.P2P_SIGNAL) {
       const target = lobby.peers.get(msg.toId);
-      // Star-topology enforcement: only signals between lobby host and guests in the same lobby
-      if (target && (peerId === lobby.hostId || msg.toId === lobby.hostId)) {
+      // Mesh WebRTC signaling within the same lobby so all room peers can measure direct P2P RTT
+      if (target && msg.toId !== peerId) {
         this._send(target.ws, {
           t: MSG.P2P_SIGNAL,
           fromId: peerId,
@@ -545,6 +562,9 @@ export class P2PCoordinator {
     const lobby = this.lobbies.get(peer.lobbyId);
     if (!lobby) return;
     lobby.peers.delete(peerId);
+    for (const p of lobby.peers.values()) {
+      if (p.peerRtts) delete p.peerRtts[peerId];
+    }
 
     if (lobby.pendingHandoverTargetId === peerId || lobby.hostId === peerId) {
       if (lobby.handoverTimer) {

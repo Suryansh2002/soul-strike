@@ -23,6 +23,8 @@ export const MSG = {
   P2P_HOST_MIGRATE: 'p2p_mig',
   P2P_LATENCY: 'p2p_lat',
   P2P_PREP_MIGRATE: 'p2p_prep',
+  PEER_PING: 'p_ping',
+  PEER_PONG: 'p_pong',
 };
 
 export const EVT = {
