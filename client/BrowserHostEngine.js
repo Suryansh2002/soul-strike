@@ -1,6 +1,11 @@
 import { GameRoom } from '../server/GameRoom.js';
 import { MSG } from '../shared/protocol.js';
 
+const nativeWorkerPostMessage =
+  typeof Worker !== 'undefined' && Worker.prototype?.postMessage
+    ? Worker.prototype.postMessage
+    : null;
+
 /**
  * Wraps the authoritative GameRoom host simulation inside an ES-module Web Worker
  * when running in the browser, with a clean in-process fallback for headless tests
@@ -10,6 +15,7 @@ export class BrowserHostEngine {
   constructor(opts = {}) {
     this.forceInProcess = Boolean(opts.forceInProcess);
     this.worker = null;
+    this._workerKey = null;
     this.room = null;
     this.checkpointTimer = null;
     this.endpoints = new Map();
@@ -18,6 +24,16 @@ export class BrowserHostEngine {
 
     this.onSendPacket = null;
     this.onCheckpoint = null;
+  }
+
+  _postToWorker(payload) {
+    if (!this.worker) return;
+    const msg = this._workerKey ? { ...payload, key: this._workerKey } : payload;
+    if (nativeWorkerPostMessage && typeof Worker !== 'undefined' && this.worker instanceof Worker) {
+      nativeWorkerPostMessage.call(this.worker, msg);
+    } else {
+      this.worker.postMessage(msg);
+    }
   }
 
   _getOrCreateVirtualWs(peerId) {
@@ -65,7 +81,7 @@ export class BrowserHostEngine {
     if (!this.forceInProcess && typeof Worker !== 'undefined') {
       try {
         const worker = new Worker(new URL('./hostWorker.js', import.meta.url), { type: 'module' });
-        worker.onmessage = (event) => {
+        const onWorkerMessage = (event) => {
           const msg = event.data;
           if (!msg || typeof msg !== 'object') return;
           if (msg.evt === 'packet') {
@@ -80,11 +96,18 @@ export class BrowserHostEngine {
             }
           }
         };
+        if (typeof worker.addEventListener === 'function') {
+          worker.addEventListener('message', onWorkerMessage);
+        } else {
+          worker.onmessage = onWorkerMessage;
+        }
         this.worker = worker;
-        this.worker.postMessage({ type: 'init', checkpoint, initialBots });
+        this._workerKey = `${Math.random().toString(36).slice(2)}_${Date.now().toString(36)}`;
+        this._postToWorker({ type: 'init', checkpoint, initialBots });
         return;
       } catch {
         this.worker = null;
+        this._workerKey = null;
       }
     }
 
@@ -93,7 +116,7 @@ export class BrowserHostEngine {
 
   addOrAttachPeer(peerId, name, team) {
     if (this.worker) {
-      this.worker.postMessage({ type: 'peer_join', peerId, name, team });
+      this._postToWorker({ type: 'peer_join', peerId, name, team });
       return;
     }
     if (!this.room) return;
@@ -104,7 +127,7 @@ export class BrowserHostEngine {
 
   removePeer(peerId) {
     if (this.worker) {
-      this.worker.postMessage({ type: 'peer_leave', peerId });
+      this._postToWorker({ type: 'peer_leave', peerId });
       return;
     }
     this.endpoints.delete(peerId);
@@ -116,7 +139,7 @@ export class BrowserHostEngine {
 
   handleClientMessage(fromId, msgObj) {
     if (this.worker) {
-      this.worker.postMessage({ type: 'client_msg', fromId, data: msgObj });
+      this._postToWorker({ type: 'client_msg', fromId, data: msgObj });
       return;
     }
     if (!this.room) return;
@@ -141,7 +164,7 @@ export class BrowserHostEngine {
     if (typeof cb !== 'function') return;
     if (this.worker) {
       this._pendingCheckpointCbs.push(cb);
-      this.worker.postMessage({ type: 'export_now' });
+      this._postToWorker({ type: 'export_now' });
       return;
     }
     cb(this.exportCheckpointNow());
@@ -151,13 +174,14 @@ export class BrowserHostEngine {
     this._pendingCheckpointCbs = [];
     if (this.worker) {
       try {
-        this.worker.postMessage({ type: 'stop' });
+        this._postToWorker({ type: 'stop' });
       } catch {}
       try {
         this.worker.terminate();
       } catch {}
       this.worker = null;
     }
+    this._workerKey = null;
     if (this.checkpointTimer) {
       clearInterval(this.checkpointTimer);
       this.checkpointTimer = null;

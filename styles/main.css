@@ -1483,8 +1483,98 @@ body.touch-device .touch-guide-grid {
   box-shadow: 0 1px 0 rgba(15, 23, 42, 0.6);
 }
 
+#touch-joy-base[data-custom-left] {
+  pointer-events: auto;
+  touch-action: none;
+}
+
+body.editing-touch-layout #touch-controls .touch-btn,
+body.editing-touch-layout #touch-joy-base {
+  pointer-events: auto !important;
+  touch-action: none !important;
+  cursor: grab;
+  outline: 2.5px dashed #fde047;
+  outline-offset: 2px;
+  opacity: 0.96;
+  z-index: 26 !important;
+}
+
+body.editing-touch-layout #touch-controls .touch-btn.layout-selected,
+body.editing-touch-layout #touch-joy-base.layout-selected {
+  outline: 3px solid #38bdf8;
+  box-shadow: 0 0 18px rgba(56, 189, 248, 0.9);
+}
+
+body.editing-touch-layout #touch-look-zone,
+body.editing-touch-layout #touch-move-zone {
+  pointer-events: none;
+}
+
+.touch-layout-editor {
+  position: fixed;
+  top: max(12px, env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(336px, 92vw);
+  background: #fffdf6;
+  color: #1e293b;
+  border: 3px solid #1e293b;
+  border-radius: 16px;
+  box-shadow: 0 6px 0 #cbd5e1, 0 14px 32px rgba(15, 23, 42, 0.42);
+  padding: 12px 14px;
+  pointer-events: auto;
+  z-index: 28;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.touch-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.touch-editor-title {
+  font-size: 13px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  color: #0f172a;
+}
+
+.touch-editor-badge {
+  background: #fde047;
+  border: 2px solid #1e293b;
+  border-radius: 7px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 900;
+  color: #0f172a;
+}
+
+.touch-editor-hint {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: #475569;
+  line-height: 1.3;
+}
+
+.touch-editor-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.mini-primary-btn {
+  margin-top: 0;
+  padding: 8px 10px;
+  font-size: 12.5px;
+  box-shadow: 0 3px 0 #15803d;
+}
+
 /* Decluttered Touch Device HUD */
-body.touch-device #hud-score-btn,
 body.touch-device .telemetry-pill,
 body.touch-device .power-slot.locked {
   display: none !important;

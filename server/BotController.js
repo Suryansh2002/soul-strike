@@ -376,7 +376,8 @@ export class BotController {
           this.attackCd <= 0 &&
           readyToReact &&
           aimErrorAngle <= profile.maxFireAngle &&
-          this.trickshotTimer <= 0
+          this.trickshotTimer <= 0 &&
+          !(target.spawnShieldTimer > 0)
         ) {
           block = false;
           const shotYaw = yaw + (Math.random() - 0.5) * profile.aimSpread;

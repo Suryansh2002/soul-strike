@@ -87,7 +87,7 @@ export function evaluateMobileCombatAssist({
   const lockDelay = weaponId === 'rail' && scoped ? cfg.scopedLockDelay : cfg.lockDelay;
 
   const validEnemies = enemies.filter(
-    (e) => e && e.al && e.id !== myId && (mode !== GAME_MODES.TDM || e.tm !== myTeam)
+    (e) => e && e.al && !(e.sp > 0) && e.id !== myId && (mode !== GAME_MODES.TDM || e.tm !== myTeam)
   );
 
   const aimDir = getAimDirection(yaw, pitch);

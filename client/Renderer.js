@@ -2503,6 +2503,43 @@ export class Renderer {
     shield.position.set(0, 0.38, -0.58);
     shield.visible = false;
 
+    // Full-Body 2s Revive Shimmer Protection Aura
+    const spawnAura = new THREE.Group();
+    spawnAura.position.set(0, 0.98, 0);
+    spawnAura.visible = false;
+
+    const auraShellMat = new THREE.MeshBasicMaterial({
+      color: '#38bdf8',
+      transparent: true,
+      opacity: 0.28,
+      depthWrite: false,
+    });
+    const auraShell = new THREE.Mesh(new THREE.SphereGeometry(0.62, 16, 12), auraShellMat);
+    auraShell.scale.set(0.95, 1.62, 0.95);
+
+    const auraLatticeMat = new THREE.MeshBasicMaterial({
+      color: '#fef08a',
+      wireframe: true,
+      transparent: true,
+      opacity: 0.45,
+      depthWrite: false,
+    });
+    const auraLattice = new THREE.Mesh(new THREE.SphereGeometry(0.64, 12, 8), auraLatticeMat);
+    auraLattice.scale.set(0.97, 1.64, 0.97);
+
+    const auraRingMat = new THREE.MeshBasicMaterial({
+      color: '#7dd3fc',
+      transparent: true,
+      opacity: 0.85,
+      depthWrite: false,
+    });
+    const auraRing1 = new THREE.Mesh(new THREE.TorusGeometry(0.64, 0.02, 8, 28), auraRingMat);
+    auraRing1.rotation.x = Math.PI / 2;
+    const auraRing2 = new THREE.Mesh(new THREE.TorusGeometry(0.64, 0.02, 8, 28), auraRingMat);
+    auraRing2.rotation.x = Math.PI / 2;
+
+    spawnAura.add(auraShell, auraLattice, auraRing1, auraRing2);
+
     // Crisp 320x80 Name & Health Sprite
     const canvas = document.createElement('canvas');
     canvas.width = 320;
@@ -2549,6 +2586,7 @@ export class Renderer {
       hipR,
       pelvisGroup,
       upperBody,
+      spawnAura,
       sprite,
       emoteSprite
     );
@@ -2583,6 +2621,14 @@ export class Renderer {
       tpRail,
       tpPan,
       shield,
+      spawnAura,
+      auraShellMat,
+      auraLattice,
+      auraLatticeMat,
+      auraRing1,
+      auraRing2,
+      auraRingMat,
+      bodyMats: [armorMat, steelMat, clothMat, goldMat],
       sprite,
       emoteSprite,
       emoteCanvas: emoCanvas,
@@ -2614,8 +2660,47 @@ export class Renderer {
     return palette[Math.abs(hash) % palette.length];
   }
 
-  updatePlayerLabel(rec, name, hp, maxHp, color) {
-    const key = `${name}:${hp}:${maxHp}:${color}`;
+  updateSpawnProtectionVisuals(rec, spawnShield, slowTimer, timeSec) {
+    if (spawnShield > 0) {
+      const shimmer = 0.5 + 0.5 * Math.sin(timeSec * 22);
+      const blink = spawnShield < 0.5 ? 0.55 + 0.45 * Math.sin(timeSec * 38) : 1.0;
+      const emissiveHex = shimmer > 0.5 ? '#38bdf8' : '#fef08a';
+      const intensity = (0.65 + shimmer * 0.6) * blink;
+
+      for (const mat of rec.bodyMats) {
+        mat.emissive.set(emissiveHex);
+        mat.emissiveIntensity = intensity;
+      }
+
+      if (rec.spawnAura) {
+        rec.spawnAura.visible = true;
+        rec.auraLattice.rotation.y = timeSec * 2.8;
+        rec.auraRing1.position.y = Math.sin(timeSec * 6.5) * 0.65;
+        rec.auraRing2.position.y = -Math.sin(timeSec * 6.5) * 0.65;
+        rec.auraRing1.rotation.z = timeSec * 2.1;
+        rec.auraRing2.rotation.z = -timeSec * 2.1;
+        rec.auraShellMat.color.set(shimmer > 0.5 ? '#38bdf8' : '#7dd3fc');
+        rec.auraShellMat.opacity = (0.18 + shimmer * 0.16) * blink;
+        rec.auraLatticeMat.opacity = (0.28 + (1 - shimmer) * 0.25) * blink;
+        rec.auraRingMat.opacity = (0.62 + shimmer * 0.3) * blink;
+      }
+    } else {
+      if (rec.spawnAura?.visible) {
+        rec.spawnAura.visible = false;
+        for (const mat of rec.bodyMats) {
+          if (mat !== rec.armorMat) {
+            mat.emissive.set('#000000');
+            mat.emissiveIntensity = 0;
+          }
+        }
+      }
+      rec.armorMat.emissive.set(slowTimer > 0 ? '#38bdf8' : '#000000');
+      rec.armorMat.emissiveIntensity = slowTimer > 0 ? 0.55 : 0;
+    }
+  }
+
+  updatePlayerLabel(rec, name, hp, maxHp, color, shielded = false) {
+    const key = `${name}:${hp}:${maxHp}:${color}:${shielded ? 1 : 0}`;
     if (rec.lastLabelKey === key) return;
     rec.lastLabelKey = key;
 
@@ -2623,20 +2708,21 @@ export class Renderer {
     ctx.clearRect(0, 0, 320, 80);
 
     // Rounded pill background
-    ctx.fillStyle = 'rgba(10, 14, 26, 0.72)';
+    ctx.fillStyle = shielded ? 'rgba(12, 30, 58, 0.84)' : 'rgba(10, 14, 26, 0.72)';
     ctx.beginPath();
     ctx.roundRect(24, 6, 272, 66, 14);
     ctx.fill();
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 3;
+    ctx.strokeStyle = shielded ? '#7dd3fc' : color;
+    ctx.lineWidth = shielded ? 4 : 3;
     ctx.stroke();
 
     ctx.font = 'bold 24px Inter, system-ui, sans-serif';
     ctx.textAlign = 'center';
+    const labelText = shielded ? `✦ ${name} · SHIELD` : name;
     ctx.fillStyle = 'rgba(0,0,0,0.9)';
-    ctx.fillText(name, 161, 35);
-    ctx.fillStyle = '#ffffff';
-    ctx.fillText(name, 160, 34);
+    ctx.fillText(labelText, 161, 35);
+    ctx.fillStyle = shielded ? '#fef08a' : '#ffffff';
+    ctx.fillText(labelText, 160, 34);
 
     // Segmented HP bar
     const barW = 220;
@@ -2646,7 +2732,7 @@ export class Renderer {
     ctx.fillStyle = 'rgba(15, 23, 42, 0.92)';
     ctx.fillRect(x - 2, y - 2, barW + 4, barH + 4);
     const ratio = Math.max(0, Math.min(1, hp / Math.max(1, maxHp)));
-    ctx.fillStyle = color;
+    ctx.fillStyle = shielded ? '#fde047' : color;
     ctx.fillRect(x, y, barW * ratio, barH);
 
     // Subtle segment ticks
@@ -3362,6 +3448,7 @@ export class Renderer {
         av.sprite.visible = false;
         av.emoteSprite.visible = false;
         av.shield.visible = Boolean(localMeta?.blocking);
+        this.updateSpawnProtectionVisuals(av, localMeta?.spawnShield || 0, localState.slowTimer || 0, timeSec);
 
         this.applyEmotePose(
           av,
@@ -3412,6 +3499,7 @@ export class Renderer {
         av.sprite.visible = false;
         av.emoteSprite.visible = false;
         av.shield.visible = Boolean(localMeta?.blocking);
+        this.updateSpawnProtectionVisuals(av, localMeta?.spawnShield || 0, localState.slowTimer || 0, timeSec);
         av.attackAnim = Math.max(0, av.attackAnim - dt * 4.2);
         av.panSwingAnim = Math.max(0, (av.panSwingAnim || 0) - dt * 4.2);
 
@@ -3590,6 +3678,7 @@ export class Renderer {
       if (!p.al) {
         rec.emote = null;
         rec.emoteSprite.visible = false;
+        if (rec.spawnAura) rec.spawnAura.visible = false;
         if (rec.deathTumble > 0) {
           rec.deathTumble -= dt;
           rec.deathVy = (rec.deathVy ?? 0) - 18 * dt;
@@ -3648,10 +3737,8 @@ export class Renderer {
         );
       }
 
-      rec.armorMat.emissive.set(p.sl > 0 ? '#38bdf8' : '#000000');
-      rec.armorMat.emissiveIntensity = p.sl > 0 ? 0.55 : 0;
-
-      this.updatePlayerLabel(rec, p.n, p.hp, p.mhp, color);
+      this.updateSpawnProtectionVisuals(rec, p.sp || 0, p.sl || 0, timeSec);
+      this.updatePlayerLabel(rec, p.n, p.hp, p.mhp, color, (p.sp || 0) > 0);
     }
 
     for (const [id, rec] of this.playerMeshes.entries()) {

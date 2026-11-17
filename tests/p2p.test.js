@@ -1,10 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { Worker as NodeWorker } from 'node:worker_threads';
 import { GameRoom } from '../server/GameRoom.js';
 import { BotController } from '../server/BotController.js';
 import { P2PCoordinator } from '../server/P2PCoordinator.js';
 import { NetClient } from '../client/NetClient.js';
-import { resolveSavedPlayerName, sanitizePlayerName } from '../client/HudUI.js';
+import {
+  TOUCH_CUSTOMIZABLE_CONTROLS,
+  TOUCH_LAYOUT_STORAGE_KEY,
+  loadTouchLayout,
+  resetTouchLayout,
+  resolveSavedPlayerName,
+  sanitizePlayerName,
+  sanitizeTouchControlEntry,
+  saveTouchLayout,
+} from '../client/HudUI.js';
 import { InputManager } from '../client/InputManager.js';
 import { computeTouchLookDelta, evaluateMobileCombatAssist } from '../client/mobileAssist.js';
 import {
@@ -14,6 +25,8 @@ import {
   GAME_MODES,
   MAX_LOBBY_PLAYERS,
   PLAYER_EYE_HEIGHT,
+  RESPAWN_TIME,
+  SPAWN_SHIELD_DURATION,
   TEAMS,
   WEAPONS,
 } from '../shared/constants.js';
@@ -1446,5 +1459,392 @@ test('Bots roast human players on kill and on block/parry with emotes and physic
   assert.ok(
     room.pendingEvents.some((ev) => ev.kind === EVT.EMOTE && ev.fromId === bot.id),
     'bot parrying a human should trigger a taunt emote'
+  );
+});
+
+test('Strategy 1: BrowserHostEngine bypasses monkey-patched Worker.prototype.postMessage and attaches session key', async () => {
+  const origWorker = globalThis.Worker;
+  const posted = [];
+  const instances = [];
+
+  class MockWorker {
+    constructor(url, opts) {
+      this.url = url;
+      this.opts = opts;
+      this._listeners = new Map();
+      this.onmessage = null;
+      this.terminated = false;
+      instances.push(this);
+    }
+
+    addEventListener(type, fn) {
+      if (!this._listeners.has(type)) this._listeners.set(type, []);
+      this._listeners.get(type).push(fn);
+    }
+
+    postMessage(msg) {
+      posted.push(msg);
+    }
+
+    emitMessage(data) {
+      const ev = { data };
+      for (const fn of this._listeners.get('message') || []) fn(ev);
+      if (typeof this.onmessage === 'function') this.onmessage(ev);
+    }
+
+    terminate() {
+      this.terminated = true;
+    }
+  }
+
+  globalThis.Worker = MockWorker;
+  try {
+    const { BrowserHostEngine } = await import(`../client/BrowserHostEngine.js?s1=${Date.now()}`);
+
+    let hookedCalls = 0;
+    MockWorker.prototype.postMessage = function () {
+      hookedCalls++;
+    };
+
+    const engine = new BrowserHostEngine({ forceInProcess: false });
+    const receivedCheckpoints = [];
+    const receivedPackets = [];
+    engine.onCheckpoint = (cp) => receivedCheckpoints.push(cp);
+    engine.onSendPacket = (toId, raw, fast) => receivedPackets.push({ toId, raw, fast });
+
+    engine.start({ initialBots: 1 });
+    assert.equal(instances.length, 1);
+    const workerInst = instances[0];
+
+    // Even if an attacker overwrites worker.onmessage, addEventListener still delivers host events
+    workerInst.onmessage = () => {};
+    workerInst.emitMessage({ evt: 'packet', toId: 'p1', raw: '{"t":"ok"}', fast: true });
+    workerInst.emitMessage({ evt: 'checkpoint', checkpoint: { seq: 1 } });
+    assert.equal(receivedPackets.length, 1);
+    assert.equal(receivedCheckpoints.length, 1);
+
+    let immediateCp = null;
+    engine.addOrAttachPeer('p1', 'HostPlayer', 0);
+    engine.handleClientMessage('p1', { t: MSG.PING, c: 123 });
+    engine.requestImmediateCheckpoint((cp) => {
+      immediateCp = cp;
+    });
+    workerInst.emitMessage({ evt: 'checkpoint', immediate: true, checkpoint: { seq: 2 } });
+    assert.deepEqual(immediateCp, { seq: 2 });
+
+    engine.stop();
+    assert.equal(workerInst.terminated, true);
+    assert.equal(hookedCalls, 0, 'hooked Worker.prototype.postMessage must never intercept host messages');
+    assert.deepEqual(
+      posted.map((m) => m.type),
+      ['init', 'peer_join', 'client_msg', 'export_now', 'stop']
+    );
+    const key = posted[0].key;
+    assert.ok(typeof key === 'string' && key.length >= 6);
+    assert.ok(posted.every((m) => m.key === key), 'every message must carry the private session key');
+  } finally {
+    globalThis.Worker = origWorker;
+  }
+});
+
+test('Strategy 1: hostWorker enforces one-time init, session key validation, and frozen prototypes', async () => {
+  const hostWorkerUrl = new URL('../client/hostWorker.js', import.meta.url).href;
+  const workerScript = `
+    const { parentPort, workerData } = require('node:worker_threads');
+    const listeners = new Map();
+    const emitted = [];
+    const selfBridge = {
+      postMessage(data) {
+        emitted.push(data);
+      },
+      addEventListener(type, fn) {
+        if (!listeners.has(type)) listeners.set(type, []);
+        listeners.get(type).push(fn);
+      },
+      setInterval,
+      clearInterval,
+    };
+    globalThis.self = selfBridge;
+
+    function dispatchToWorker(msg) {
+      const event = { data: msg };
+      const list = listeners.get('message') || [];
+      if (list.length > 0) {
+        for (const fn of list) fn(event);
+      } else if (typeof selfBridge.onmessage === 'function') {
+        selfBridge.onmessage(event);
+      }
+    }
+
+    (async () => {
+      await import(workerData.hostWorkerUrl);
+      const result = {};
+
+      result.frozen = {
+        map: Object.isFrozen(Map.prototype),
+        set: Object.isFrozen(Set.prototype),
+        array: Object.isFrozen(Array.prototype),
+        json: Object.isFrozen(JSON),
+        math: Object.isFrozen(Math),
+      };
+
+      const origMapValues = Map.prototype.values;
+      let mapHookThrew = false;
+      try {
+        (() => {
+          'use strict';
+          Map.prototype.values = () => 'hacked';
+        })();
+      } catch {
+        mapHookThrew = true;
+      }
+      // Also test sloppy-mode assignment (DevTools Console runs sloppy mode)
+      Map.prototype.values = () => 'hacked_sloppy';
+      result.mapHookBlocked = mapHookThrew && Map.prototype.values === origMapValues;
+
+      let onMessageHookThrew = false;
+      const origOnMessage = selfBridge.onmessage;
+      try {
+        (() => {
+          'use strict';
+          selfBridge.onmessage = () => {};
+        })();
+      } catch {
+        onMessageHookThrew = true;
+      }
+      selfBridge.onmessage = () => {};
+      result.onMessageLocked = onMessageHookThrew && selfBridge.onmessage === origOnMessage;
+
+      // 1. Valid first init + peer join + buy works with frozen prototypes
+      dispatchToWorker({ type: 'init', key: 'secret_123', initialBots: 1 });
+      dispatchToWorker({ type: 'peer_join', key: 'secret_123', peerId: 'p1', name: 'HostHero', team: 0 });
+      dispatchToWorker({
+        type: 'client_msg',
+        key: 'secret_123',
+        fromId: 'p1',
+        data: { t: 'buy', category: 'power', id: 'blink' },
+      });
+
+      const countBeforeSpoof = emitted.length;
+
+      // 2. Wrong/missing key export_now is ignored
+      dispatchToWorker({ type: 'export_now', key: 'wrong_key' });
+      dispatchToWorker({ type: 'export_now' });
+      result.wrongKeyIgnored = emitted.length === countBeforeSpoof;
+
+      // 3. Second init attempting to overwrite GameRoom with cheated checkpoint is ignored
+      dispatchToWorker({
+        type: 'init',
+        key: 'secret_123',
+        checkpoint: {
+          seq: 999,
+          players: [{ id: 'p1', name: 'HostHero', hp: 195, maxHp: 195, essence: 9999 }],
+        },
+      });
+      result.secondInitIgnored = emitted.length === countBeforeSpoof;
+
+      // 4. Overwriting self.postMessage later cannot hijack postToMain
+      selfBridge.postMessage = () => {};
+      dispatchToWorker({ type: 'export_now', key: 'secret_123' });
+      const latestImmediate = emitted.find((m) => m.evt === 'checkpoint' && m.immediate);
+      const p1 = latestImmediate?.checkpoint?.players?.find((p) => p.id === 'p1');
+      result.validExportAfter = Boolean(p1 && p1.essence === 25 && p1.unlockedPowers.includes('blink') && p1.hp <= 120);
+      result.botCount = latestImmediate?.checkpoint?.players?.filter((p) => p.isBot).length || 0;
+
+      dispatchToWorker({ type: 'stop', key: 'secret_123' });
+      parentPort.postMessage(result);
+    })();
+  `;
+
+  const result = await new Promise((resolve, reject) => {
+    const w = new NodeWorker(workerScript, { eval: true, workerData: { hostWorkerUrl } });
+    w.on('message', resolve);
+    w.on('error', reject);
+    w.on('exit', (code) => {
+      if (code !== 0) reject(new Error(`Worker exited with code ${code}`));
+    });
+  });
+
+  assert.deepEqual(result.frozen, { map: true, set: true, array: true, json: true, math: true });
+  assert.equal(result.mapHookBlocked, true, 'Map.prototype.values monkey-patch must be blocked');
+  assert.equal(result.onMessageLocked, true, 'self.onmessage replacement must be blocked');
+  assert.equal(result.wrongKeyIgnored, true, 'export_now with wrong/missing key must be ignored');
+  assert.equal(result.secondInitIgnored, true, 're-running init to overwrite checkpoint must be ignored');
+  assert.equal(result.validExportAfter, true, 'gameplay & valid export_now must continue working normally');
+  assert.equal(result.botCount, 1);
+});
+
+test('Newly revived players get a 2s spawn shield blocking damage, knockback, bots, and mobile auto-fire', () => {
+  const room = new GameRoom();
+  const ws1 = createRecordingSocket();
+  const ws2 = createRecordingSocket();
+  const attacker = room.addHumanPlayer(ws1, 'Attacker');
+  const victim = room.addHumanPlayer(ws2, 'RevivedOne');
+
+  // Fresh spawn on match join starts with no spawn shield
+  assert.equal(victim.spawnShieldTimer, 0);
+
+  // Kill victim -> wait out respawn timer -> revived player gets SPAWN_SHIELD_DURATION (2.0s)
+  room.applyDamage(attacker, victim, 500, 'Arcane Bolt', false, { x: 0, y: 0, z: -1 }, { x: victim.x, y: victim.y + 1, z: victim.z }, false, true);
+  assert.equal(victim.alive, false);
+  assert.equal(victim.deaths, 1);
+
+  const respawnSteps = Math.ceil((RESPAWN_TIME + 0.05) / FIXED_DT);
+  for (let i = 0; i < respawnSteps && !victim.alive; i++) {
+    room.stepSimulation(FIXED_DT);
+  }
+  assert.equal(victim.alive, true);
+  assert.ok(
+    victim.spawnShieldTimer >= SPAWN_SHIELD_DURATION - FIXED_DT && victim.spawnShieldTimer <= SPAWN_SHIELD_DURATION,
+    `Expected ~2s revive shield, got ${victim.spawnShieldTimer}`
+  );
+
+  // Reset to exact 2.0s for clean assertions
+  victim.spawnShieldTimer = SPAWN_SHIELD_DURATION;
+  victim.x = -19.5;
+  victim.y = 0;
+  victim.z = -4.0;
+  victim.vx = 0;
+  victim.vy = 0;
+  victim.vz = 0;
+  attacker.x = -19.5;
+  attacker.y = 0;
+  attacker.z = 8.0;
+
+  // 1. Direct hitscan, Golden Pan bypassDefense, and splash explosion all deal 0 damage and 0 knockback
+  const hpBefore = victim.hp;
+  const hitDmg = room.applyDamage(attacker, victim, 75, 'Astral Rail', true, { x: 0, y: 0, z: -1 }, { x: victim.x, y: victim.y + 1.5, z: victim.z });
+  const panDmg = room.applyDamage(attacker, victim, 500, 'Golden Pan', false, { x: 0, y: 0, z: -1 }, { x: victim.x, y: victim.y + 1, z: victim.z }, false, true);
+  room.explodeAt(attacker, { x: victim.x, y: victim.y + 0.5, z: victim.z }, 5.0, 90, '#f97316', 'Pyre Fireball', 2.0);
+  assert.equal(hitDmg, 0);
+  assert.equal(panDmg, 0);
+  assert.equal(victim.hp, hpBefore);
+  assert.equal(victim.alive, true);
+  assert.equal(victim.vx, 0);
+  assert.equal(victim.vy, 0);
+  assert.equal(victim.vz, 0);
+  assert.equal(victim.slowTimer, 0);
+
+  // 2. Bots hold fire while victim's spawn shield is active
+  const bot = room.addBot();
+  const botCtrl = room.bots.get(bot.id);
+  bot.x = -19.5;
+  bot.y = 0;
+  bot.z = 4.0;
+  bot.yaw = 0;
+  bot.pitch = 0;
+  botCtrl.attackCd = 0;
+  botCtrl.targetSightTimer = 1.0;
+  botCtrl.step(bot, room, FIXED_DT);
+  assert.equal(victim.hp, hpBefore, 'bot must hold fire while target has revive shield');
+
+  // 3. Mobile auto-fire ignores spawn-protected enemies (sp > 0)
+  const assistBlocked = evaluateMobileCombatAssist({
+    eye: { x: -19.5, y: PLAYER_EYE_HEIGHT, z: 8.0 },
+    yaw: 0,
+    pitch: -0.02,
+    weaponId: 'staff',
+    enemies: [{ id: victim.id, al: 1, tm: victim.team, x: -19.5, y: 0, z: -4.0, sp: 1.5 }],
+    myId: attacker.id,
+    myTeam: attacker.team,
+    mode: GAME_MODES.FFA,
+    dt: 0.1,
+    aimAssistEnabled: true,
+    autoFireEnabled: true,
+    lockTimer: 0.5,
+  });
+  assert.equal(assistBlocked.targetLocked, false);
+  assert.equal(assistBlocked.shouldAutoFire, false);
+
+  // 4. Snapshot broadcasts `sp`, checkpoint preserves & coordinator clamps `spawnShieldTimer`
+  ws2.sent.length = 0;
+  room.broadcastSnapshot();
+  const snap = ws2.sent.find((m) => m.t === MSG.SNAPSHOT);
+  const snapVictim = snap?.pl.find((pl) => pl.id === victim.id);
+  assert.ok(snapVictim && snapVictim.sp > 1.5);
+
+  const cp = room.exportCheckpoint();
+  const coord = new P2PCoordinator();
+  const cWs1 = createRecordingSocket();
+  const cWs2 = createRecordingSocket();
+  const cpId1 = coord.handleJoin(cWs1, { name: 'Attacker' });
+  const cpId2 = coord.handleJoin(cWs2, { name: 'RevivedOne' });
+  const lobby = coord.lobbies.get(coord.peers.get(cpId1).lobbyId);
+  const sanitized = coord.sanitizeCheckpoint(
+    {
+      ...cp,
+      players: [
+        { id: cpId1, name: 'Attacker', spawnShieldTimer: 0 },
+        { id: cpId2, name: 'RevivedOne', spawnShieldTimer: 99 },
+      ],
+    },
+    lobby
+  );
+  assert.equal(sanitized.players.find((pl) => pl.id === cpId2).spawnShieldTimer, SPAWN_SHIELD_DURATION);
+
+  const roomRestored = new GameRoom();
+  roomRestored.importCheckpoint(cp, () => createRecordingSocket());
+  assert.ok(roomRestored.players.get(victim.id).spawnShieldTimer > 1.5);
+
+  // 5. Once 2.0s elapses, spawn shield expires and victim takes damage normally
+  const shieldSteps = Math.ceil((SPAWN_SHIELD_DURATION + 0.05) / FIXED_DT);
+  for (let i = 0; i < shieldSteps; i++) {
+    room.stepSimulation(FIXED_DT);
+  }
+  assert.equal(victim.spawnShieldTimer, 0);
+  const postShieldDmg = room.applyDamage(attacker, victim, 50, 'Arcane Bolt', false, { x: 0, y: 0, z: -1 }, { x: victim.x, y: victim.y + 1, z: victim.z });
+  assert.equal(postShieldDmg, 50);
+  assert.equal(victim.hp, hpBefore - 50);
+});
+
+test('Touch layout customization clamps coordinates/scales, persists in localStorage, resets cleanly, and smartphone RANKS button is not hidden', () => {
+  function createMemoryStorage(initial = {}) {
+    const map = new Map(Object.entries(initial));
+    return {
+      getItem: (k) => (map.has(k) ? map.get(k) : null),
+      setItem: (k, v) => map.set(k, String(v)),
+      removeItem: (k) => map.delete(k),
+    };
+  }
+
+  // 1. Entry sanitization clamps out-of-range x, y (5..95) and scale (0.5..1.8)
+  assert.equal(sanitizeTouchControlEntry(null), null);
+  assert.equal(sanitizeTouchControlEntry({ x: NaN, y: 50, scale: 1 }), null);
+  assert.deepEqual(sanitizeTouchControlEntry({ x: -20, y: 140, scale: 3.5 }), { x: 5, y: 95, scale: 1.8 });
+  assert.deepEqual(sanitizeTouchControlEntry({ x: 82.34, y: 61.26, scale: 0.2 }), { x: 82.3, y: 61.3, scale: 0.5 });
+
+  // 2. Save, reload, ignore unknown control IDs, and reset in storage
+  const storage = createMemoryStorage();
+  const saved = saveTouchLayout(storage, {
+    fire: { x: 85.4, y: 74.2, scale: 1.35 },
+    joystick: { x: 16.5, y: 76.0, scale: 0.85 },
+    invalidControl: { x: 50, y: 50, scale: 1.0 },
+  });
+  assert.deepEqual(Object.keys(saved).sort(), ['fire', 'joystick']);
+  assert.ok(storage.getItem(TOUCH_LAYOUT_STORAGE_KEY));
+
+  const reloaded = loadTouchLayout(storage);
+  assert.deepEqual(reloaded, {
+    fire: { x: 85.4, y: 74.2, scale: 1.35 },
+    joystick: { x: 16.5, y: 76, scale: 0.85 },
+  });
+  assert.ok(TOUCH_CUSTOMIZABLE_CONTROLS.jump && TOUCH_CUSTOMIZABLE_CONTROLS.dash && TOUCH_CUSTOMIZABLE_CONTROLS.block);
+
+  // Malformed JSON in storage degrades safely
+  const corruptStorage = createMemoryStorage({ [TOUCH_LAYOUT_STORAGE_KEY]: '{bad-json' });
+  assert.deepEqual(loadTouchLayout(corruptStorage), {});
+
+  // Reset removes key and returns empty layout
+  const cleared = resetTouchLayout(storage);
+  assert.deepEqual(cleared, {});
+  assert.equal(storage.getItem(TOUCH_LAYOUT_STORAGE_KEY), null);
+  assert.deepEqual(loadTouchLayout(storage), {});
+
+  // 3. CSS must NOT hide #hud-score-btn (RANKS) on touch-device
+  const css = fs.readFileSync(new URL('../styles/main.css', import.meta.url), 'utf8');
+  assert.equal(
+    /body\.touch-device\s+#hud-score-btn[\s\S]*?display:\s*none/i.test(css),
+    false,
+    'styles/main.css must not hide #hud-score-btn on touch devices'
   );
 });

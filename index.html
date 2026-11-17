@@ -86,6 +86,23 @@
         </div>
       </div>
 
+      <!-- Mobile Touch Layout Customizer Bar -->
+      <div id="touch-layout-editor" class="touch-layout-editor hidden">
+        <div class="touch-editor-head">
+          <span class="touch-editor-title">CUSTOMIZE CONTROLS</span>
+          <span id="touch-editor-selected" class="touch-editor-badge">Selected: FIRE</span>
+        </div>
+        <p class="touch-editor-hint">Drag any button or joystick to move it. Tap a button to adjust its size.</p>
+        <label class="setting-slider touch-editor-slider" for="touch-btn-size-slider">
+          <span>Button Size <strong id="touch-btn-size-val">100%</strong></span>
+          <input id="touch-btn-size-slider" type="range" min="0.5" max="1.8" step="0.05" value="1.0" />
+        </label>
+        <div class="touch-editor-actions">
+          <button id="touch-layout-reset-btn" class="sec-btn mini-btn" type="button">Reset Default</button>
+          <button id="touch-layout-save-btn" class="primary-btn mini-primary-btn" type="button">Save &amp; Done</button>
+        </div>
+      </div>
+
       <!-- Quick Mobile / Mouse HUD Bar -->
       <div class="hud-quick-actions">
         <button id="hud-shop-btn" class="quick-btn shop-cta" type="button">SHOP<span class="kbd-hint"> [B]</span></button>
@@ -189,6 +206,10 @@
             <div id="aimassist-setting-row" class="setting-row hidden">
               <span>Aim Assist</span>
               <button id="menu-aimassist-btn" class="sec-btn mini-btn" type="button">ON</button>
+            </div>
+            <div id="touch-layout-setting-row" class="setting-row hidden">
+              <span>Touch Buttons Layout</span>
+              <button id="menu-customize-hud-btn" class="sec-btn mini-btn" type="button">CUSTOMIZE</button>
             </div>
             <label id="gyro-sens-row" class="setting-slider hidden" for="gyro-sens-slider">
               <span>Gyro Sensitivity <strong id="gyro-sens-val">1.8x</strong></span>

@@ -53,6 +53,7 @@ export class InputManager {
     this.pointerLocked = false;
     this.activePlay = false;
     this.uiBlocked = false;
+    this.editingLayout = false;
     this.touchBound = false;
 
     this.mouseDownLeft = false;
@@ -199,11 +200,18 @@ export class InputManager {
     if (knob) knob.style.transform = 'translate(-50%, -50%)';
     if (joyBase) {
       joyBase.classList.remove('active');
-      joyBase.style.left = '';
-      joyBase.style.top = '';
-      joyBase.style.bottom = '';
+      joyBase.style.left = joyBase.dataset.customLeft || '';
+      joyBase.style.top = joyBase.dataset.customTop || '';
+      joyBase.style.bottom = joyBase.dataset.customTop ? 'auto' : '';
     }
     document.querySelectorAll?.('#touch-controls .touch-btn.active').forEach((b) => b.classList.remove('active'));
+  }
+
+  setEditingLayout(editing) {
+    this.editingLayout = Boolean(editing);
+    if (this.editingLayout) {
+      this.setUiBlocked(true);
+    }
   }
 
   setScoped(scoped) {
@@ -450,31 +458,46 @@ export class InputManager {
     if (!moveZone || !lookZone) return;
     this.touchBound = true;
 
+    const startMoveTouch = (t, keepFixedCenter = false) => {
+      if (this.moveTouchId !== null) return;
+      this.moveTouchId = t.identifier;
+      const baseHalf = joyBase ? joyBase.offsetWidth / 2 || 58 : 58;
+      this.moveMaxRadius = clamp(baseHalf * 0.78, 28, 96);
+      if (keepFixedCenter && joyBase) {
+        const jRect = joyBase.getBoundingClientRect();
+        this.moveOrigin = {
+          x: jRect.left + jRect.width / 2,
+          y: jRect.top + jRect.height / 2,
+        };
+        joyBase.classList.add('active');
+        this.updateJoystick(t, knob, this.moveMaxRadius);
+        return;
+      }
+      const rect = moveZone.getBoundingClientRect();
+      const pad = this.moveMaxRadius + 10;
+      const minX = rect.left + pad;
+      const maxX = Math.max(minX, rect.right - pad);
+      const minY = rect.top + pad;
+      const maxY = Math.max(minY, rect.bottom - pad);
+      const originX = clamp(t.clientX, minX, maxX);
+      const originY = clamp(t.clientY, minY, maxY);
+      this.moveOrigin = { x: originX, y: originY };
+      if (joyBase) {
+        const isFixed = Boolean(joyBase.dataset.customLeft);
+        joyBase.style.left = `${originX - (isFixed ? 0 : rect.left) - baseHalf}px`;
+        joyBase.style.top = `${originY - (isFixed ? 0 : rect.top) - baseHalf}px`;
+        joyBase.style.bottom = 'auto';
+        joyBase.classList.add('active');
+      }
+      this.updateJoystick(t, knob, this.moveMaxRadius);
+    };
+
     moveZone.addEventListener(
       'touchstart',
       (e) => {
+        if (this.editingLayout) return;
         e.preventDefault();
-        if (this.moveTouchId !== null) return;
-        const t = e.changedTouches[0];
-        this.moveTouchId = t.identifier;
-        const rect = moveZone.getBoundingClientRect();
-        const baseHalf = joyBase ? joyBase.offsetWidth / 2 || 58 : 58;
-        this.moveMaxRadius = clamp(baseHalf * 0.78, 36, 52);
-        const pad = this.moveMaxRadius + 10;
-        const minX = rect.left + pad;
-        const maxX = Math.max(minX, rect.right - pad);
-        const minY = rect.top + pad;
-        const maxY = Math.max(minY, rect.bottom - pad);
-        const originX = clamp(t.clientX, minX, maxX);
-        const originY = clamp(t.clientY, minY, maxY);
-        this.moveOrigin = { x: originX, y: originY };
-        if (joyBase) {
-          joyBase.style.left = `${originX - rect.left - baseHalf}px`;
-          joyBase.style.top = `${originY - rect.top - baseHalf}px`;
-          joyBase.style.bottom = 'auto';
-          joyBase.classList.add('active');
-        }
-        this.updateJoystick(t, knob, this.moveMaxRadius);
+        startMoveTouch(e.changedTouches[0], false);
       },
       { passive: false }
     );
@@ -482,6 +505,7 @@ export class InputManager {
     moveZone.addEventListener(
       'touchmove',
       (e) => {
+        if (this.editingLayout) return;
         e.preventDefault();
         for (const t of e.changedTouches) {
           if (t.identifier === this.moveTouchId) {
@@ -502,11 +526,41 @@ export class InputManager {
     moveZone.addEventListener('touchend', endMove, { passive: false });
     moveZone.addEventListener('touchcancel', endMove, { passive: false });
 
+    if (joyBase) {
+      joyBase.addEventListener(
+        'touchstart',
+        (e) => {
+          if (this.editingLayout || !joyBase.dataset.customLeft) return;
+          e.preventDefault();
+          e.stopPropagation();
+          startMoveTouch(e.changedTouches[0], true);
+        },
+        { passive: false }
+      );
+      joyBase.addEventListener(
+        'touchmove',
+        (e) => {
+          if (this.editingLayout || !joyBase.dataset.customLeft) return;
+          e.preventDefault();
+          e.stopPropagation();
+          for (const t of e.changedTouches) {
+            if (t.identifier === this.moveTouchId) {
+              this.updateJoystick(t, knob, this.moveMaxRadius);
+            }
+          }
+        },
+        { passive: false }
+      );
+      joyBase.addEventListener('touchend', endMove, { passive: false });
+      joyBase.addEventListener('touchcancel', endMove, { passive: false });
+    }
+
     const bindTouchLookTrack = (el, idProp, lastProp, buttonScale, onStart, onEnd, { ignoreIfActive = false } = {}) => {
       if (!el) return;
       el.addEventListener(
         'touchstart',
         (e) => {
+          if (this.editingLayout) return;
           e.preventDefault();
           if (ignoreIfActive && this[idProp] !== null) return;
           const t = e.changedTouches[0];
@@ -519,6 +573,7 @@ export class InputManager {
       el.addEventListener(
         'touchmove',
         (e) => {
+          if (this.editingLayout) return;
           e.preventDefault();
           if (!this.isControlling) return;
           for (const t of e.changedTouches) {

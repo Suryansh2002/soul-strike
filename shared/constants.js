@@ -36,6 +36,7 @@ export const PARRY_WINDOW = 0.26;
 export const BLOCK_STAMINA_DRAIN = 14.0;
 
 export const RESPAWN_TIME = 3.0;
+export const SPAWN_SHIELD_DURATION = 2.0;
 export const MATCH_DURATION_SEC = 300;
 export const MAX_LOBBY_PLAYERS = 8;
 export const FFA_KILL_LIMIT = 25;

@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { ARENA_HALF_SIZE } from '../shared/arena.js';
-import { GAME_MODES, HOST_EVAL_INTERVAL_MS, MAX_LOBBY_PLAYERS, normalizeBotDifficulty } from '../shared/constants.js';
+import { GAME_MODES, HOST_EVAL_INTERVAL_MS, MAX_LOBBY_PLAYERS, SPAWN_SHIELD_DURATION, normalizeBotDifficulty } from '../shared/constants.js';
 import { clamp, finiteNum } from '../shared/physics.js';
 import { MSG } from '../shared/protocol.js';
 
@@ -365,6 +365,9 @@ export class P2PCoordinator {
         if (copy.mana !== undefined) copy.mana = clamp(finiteNum(copy.mana, 0), 0, 10000);
         if (copy.stamina !== undefined) copy.stamina = clamp(finiteNum(copy.stamina, 0), 0, 10000);
         if (copy.essence !== undefined) copy.essence = clamp(finiteNum(copy.essence, 0), 0, 10000);
+        if (copy.spawnShieldTimer !== undefined) {
+          copy.spawnShieldTimer = clamp(finiteNum(copy.spawnShieldTimer, 0), 0, SPAWN_SHIELD_DURATION);
+        }
         sanitizedPlayers.push(copy);
       }
 

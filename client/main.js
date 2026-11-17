@@ -129,6 +129,19 @@ const hud = new HudUI({
     hud.setAimAssistUi(enabled);
     hud.showEmoteToast(enabled ? 'AIM ASSIST ON' : 'AIM ASSIST OFF');
   },
+  onOpenTouchLayoutEditor() {
+    input.setEditingLayout(true);
+  },
+  onCloseTouchLayoutEditor() {
+    input.setEditingLayout(false);
+    hud.setShopOpen(false);
+    hud.setEmoteTrayOpen(false);
+    hud.setScoreboardOpen(false);
+    hud.setPauseOverlay(false);
+    input.setUiBlocked(false);
+    input.requestPointerLock();
+    hud.showEmoteToast('TOUCH CONTROLS SAVED');
+  },
   onOpenMenu() {
     if (!joined) return;
     hud.setShopOpen(false);
@@ -713,6 +726,7 @@ function loop(now) {
         weapon: myServerState.wp,
         blocking: input.mouseDownRight && myServerState.wp !== 'rail' && predState.stamina > 2,
         scoped: isRailScoped,
+        spawnShield: myServerState.sp || 0,
       }
     : null;
 

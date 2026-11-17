@@ -29,6 +29,7 @@ import {
   RUNES,
   SIM_HZ,
   SNAPSHOT_INTERVAL_MS,
+  SPAWN_SHIELD_DURATION,
   TDM_KILL_LIMIT,
   TEAMS,
   WEAPONS,
@@ -137,6 +138,7 @@ export class GameRoom {
       jumpPadCd: 0,
       coyoteTimer: 0,
       slowTimer: 0,
+      spawnShieldTimer: 0,
       blocking: false,
       blockStartAt: 0,
 
@@ -304,7 +306,7 @@ export class GameRoom {
     }
   }
 
-  respawnPlayer(p) {
+  respawnPlayer(p, isRevive = p.deaths > 0) {
     const candidates = SPAWN_POINTS.filter((s) =>
       this.mode === GAME_MODES.TDM ? s.team === p.team || s.team === TEAMS.NONE : true
     );
@@ -344,6 +346,7 @@ export class GameRoom {
     p.shield = 0;
     p.slowTimer = 0;
     p.dashTimer = 0;
+    p.spawnShieldTimer = isRevive ? SPAWN_SHIELD_DURATION : 0;
     if (p.weapon === 'pan') {
       p.weapon = p.prevWeapon && p.unlockedWeapons.has(p.prevWeapon) ? p.prevWeapon : 'staff';
     }
@@ -1053,6 +1056,7 @@ export class GameRoom {
 
   applyDamage(attacker, victim, rawDmg, sourceName, headshot, dir, hitPoint, isSplash = false, bypassDefense = false) {
     if (!victim.alive || this.matchState !== 'playing') return 0;
+    if ((victim.spawnShieldTimer || 0) > 0) return 0;
 
     // Brief dash evasion i-frames (bypassed by lethal one-shot weapons like the Pan)
     if (!bypassDefense && victim.dashTimer > 0.06 && !isSplash) {
@@ -1239,9 +1243,13 @@ export class GameRoom {
       if (!p.alive) {
         p.respawnTimer -= dt;
         if (p.respawnTimer <= 0 && this.matchState === 'playing') {
-          this.respawnPlayer(p);
+          this.respawnPlayer(p, true);
         }
         continue;
+      }
+
+      if (p.spawnShieldTimer > 0) {
+        p.spawnShieldTimer = Math.max(0, p.spawnShieldTimer - dt);
       }
 
       const conduitRank = p.runes.conduit || 0;
@@ -1495,7 +1503,7 @@ export class GameRoom {
     });
 
     for (const other of this.players.values()) {
-      if (!other.alive) continue;
+      if (!other.alive || (other.spawnShieldTimer || 0) > 0) continue;
       if (owner && other.id !== owner.id && !this.isHostile(owner, other)) continue;
       const selfMult = owner && other.id === owner.id ? 0.35 : 1.0;
 
@@ -1563,6 +1571,7 @@ export class GameRoom {
         jumpPadCd: p.jumpPadCd,
         coyoteTimer: p.coyoteTimer,
         slowTimer: p.slowTimer,
+        spawnShieldTimer: r2(p.spawnShieldTimer || 0),
         blocking: Boolean(p.blocking),
         blockStartAt: p.blockStartAt,
         weapon: p.weapon,
@@ -1722,6 +1731,7 @@ export class GameRoom {
           jumpPadCd: clamp(finiteNum(sp.jumpPadCd, 0), 0, 5),
           coyoteTimer: clamp(finiteNum(sp.coyoteTimer, 0), 0, 1),
           slowTimer: clamp(finiteNum(sp.slowTimer, 0), 0, 10),
+          spawnShieldTimer: clamp(finiteNum(sp.spawnShieldTimer, 0), 0, SPAWN_SHIELD_DURATION),
           blocking: Boolean(sp.blocking),
           blockStartAt: finiteNum(sp.blockStartAt, 0),
 
@@ -1792,6 +1802,7 @@ export class GameRoom {
         bl: p.blocking ? 1 : 0,
         dt: r2(p.dashTimer),
         sl: r2(p.slowTimer),
+        sp: r2(p.spawnShieldTimer || 0),
         wp: p.weapon,
         es: p.essence,
         kl: p.kills,

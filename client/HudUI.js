@@ -1,5 +1,75 @@
 import { EMOTES, GAME_MODES, POWERS, RUNES, TEAMS, WEAPONS } from '../shared/constants.js';
 
+export const TOUCH_LAYOUT_STORAGE_KEY = 'soulstrike_touch_layout';
+
+export const TOUCH_CUSTOMIZABLE_CONTROLS = {
+  fire: { id: 'fire', elId: 'touch-fire-btn', label: 'FIRE', baseSize: 74, baseFont: 14 },
+  jump: { id: 'jump', elId: 'touch-jump-btn', label: 'JUMP', baseSize: 52, baseFont: 11 },
+  dash: { id: 'dash', elId: 'touch-dash-btn', label: 'DASH', baseSize: 50, baseFont: 11 },
+  block: { id: 'block', elId: 'touch-block-btn', label: 'GUARD / SCOPE', baseSize: 50, baseFont: 11 },
+  joystick: { id: 'joystick', elId: 'touch-joy-base', label: 'JOYSTICK', baseSize: 116, baseKnobSize: 48 },
+};
+
+function clampNum(val, min, max) {
+  return val < min ? min : val > max ? max : val;
+}
+
+export function sanitizeTouchControlEntry(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  const x = Number(entry.x);
+  const y = Number(entry.y);
+  const scale = entry.scale === undefined ? 1.0 : Number(entry.scale);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(scale)) return null;
+  return {
+    x: Math.round(clampNum(x, 5, 95) * 10) / 10,
+    y: Math.round(clampNum(y, 5, 95) * 10) / 10,
+    scale: Math.round(clampNum(scale, 0.5, 1.8) * 100) / 100,
+  };
+}
+
+export function loadTouchLayout(storage) {
+  if (!storage) return {};
+  try {
+    const raw = storage.getItem(TOUCH_LAYOUT_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return {};
+    const out = {};
+    for (const id of Object.keys(TOUCH_CUSTOMIZABLE_CONTROLS)) {
+      const clean = sanitizeTouchControlEntry(parsed[id]);
+      if (clean) out[id] = clean;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+export function saveTouchLayout(storage, layout) {
+  if (!storage || !layout || typeof layout !== 'object') return {};
+  const out = {};
+  for (const id of Object.keys(TOUCH_CUSTOMIZABLE_CONTROLS)) {
+    const clean = sanitizeTouchControlEntry(layout[id]);
+    if (clean) out[id] = clean;
+  }
+  try {
+    if (Object.keys(out).length === 0) {
+      storage.removeItem(TOUCH_LAYOUT_STORAGE_KEY);
+    } else {
+      storage.setItem(TOUCH_LAYOUT_STORAGE_KEY, JSON.stringify(out));
+    }
+  } catch {}
+  return out;
+}
+
+export function resetTouchLayout(storage) {
+  if (!storage) return {};
+  try {
+    storage.removeItem(TOUCH_LAYOUT_STORAGE_KEY);
+  } catch {}
+  return {};
+}
+
 export function resolveSavedPlayerName(storage) {
   if (!storage) return '';
   const confirmed = storage.getItem('soulstrike_name_confirmed') === '1';
@@ -19,6 +89,10 @@ export class HudUI {
     this.cb = callbacks;
     this.shopOpen = false;
     this.emoteTrayOpen = false;
+    this.layoutEditorOpen = false;
+    this.isTouchMode = false;
+    this.selectedTouchControlId = 'fire';
+    this.touchLayout = typeof localStorage !== 'undefined' ? loadTouchLayout(localStorage) : {};
     this.killFeed = [];
     this.hitmarkerTimer = 0;
     this.hitmarkerHeadshot = false;
@@ -76,6 +150,14 @@ export class HudUI {
       aimAssistSettingRow: document.getElementById('aimassist-setting-row'),
       gyroSensRow: document.getElementById('gyro-sens-row'),
       touchSensRow: document.getElementById('touch-sens-row'),
+      touchLayoutSettingRow: document.getElementById('touch-layout-setting-row'),
+      menuCustomizeHudBtn: document.getElementById('menu-customize-hud-btn'),
+      touchLayoutEditor: document.getElementById('touch-layout-editor'),
+      touchEditorSelected: document.getElementById('touch-editor-selected'),
+      touchBtnSizeSlider: document.getElementById('touch-btn-size-slider'),
+      touchBtnSizeVal: document.getElementById('touch-btn-size-val'),
+      touchLayoutResetBtn: document.getElementById('touch-layout-reset-btn'),
+      touchLayoutSaveBtn: document.getElementById('touch-layout-save-btn'),
       gyroSensSlider: document.getElementById('gyro-sens-slider'),
       gyroSensVal: document.getElementById('gyro-sens-val'),
       touchSensSlider: document.getElementById('touch-sens-slider'),
@@ -91,10 +173,12 @@ export class HudUI {
 
     this.renderEmoteTray();
     this.bindEvents();
+    this.applyTouchLayout();
   }
 
   setTouchMode(isTouch) {
-    document.body.classList.toggle('touch-device', Boolean(isTouch));
+    this.isTouchMode = Boolean(isTouch);
+    document.body.classList.toggle('touch-device', this.isTouchMode);
     const tc = document.getElementById('touch-controls');
     if (tc) tc.classList.toggle('hidden', !isTouch);
     this.el.gyroBtn?.classList.toggle('hidden', !isTouch);
@@ -104,6 +188,8 @@ export class HudUI {
     this.el.aimAssistSettingRow?.classList.toggle('hidden', !isTouch);
     this.el.gyroSensRow?.classList.toggle('hidden', !isTouch);
     this.el.touchSensRow?.classList.toggle('hidden', !isTouch);
+    this.el.touchLayoutSettingRow?.classList.toggle('hidden', !isTouch);
+    this.applyTouchLayout();
   }
 
   setAutoFireUi(enabled) {
@@ -252,6 +338,42 @@ export class HudUI {
     this.el.touchSensSlider?.addEventListener('input', (e) => {
       this.cb.onTouchSensChange?.(Number(e.target.value));
     });
+    this.el.menuCustomizeHudBtn?.addEventListener('click', () => this.openTouchLayoutEditor());
+    this.el.touchLayoutSaveBtn?.addEventListener('click', () => this.closeTouchLayoutEditor());
+    this.el.touchLayoutResetBtn?.addEventListener('click', () => {
+      this.touchLayout = resetTouchLayout(localStorage);
+      this.applyTouchLayout();
+      this.selectTouchControl(this.selectedTouchControlId || 'fire');
+    });
+    this.el.touchBtnSizeSlider?.addEventListener('input', (e) => {
+      const id = this.selectedTouchControlId || 'fire';
+      const cfg = TOUCH_CUSTOMIZABLE_CONTROLS[id];
+      if (!cfg) return;
+      const el = document.getElementById(cfg.elId);
+      let entry = this.touchLayout[id];
+      if (!entry && el) {
+        const rect = el.getBoundingClientRect();
+        const vw = Math.max(1, window.innerWidth || 1);
+        const vh = Math.max(1, window.innerHeight || 1);
+        entry = {
+          x: ((rect.left + rect.width / 2) / vw) * 100,
+          y: ((rect.top + rect.height / 2) / vh) * 100,
+          scale: 1.0,
+        };
+      }
+      if (!entry) entry = { x: 50, y: 50, scale: 1.0 };
+      const scale = Number(e.target.value) || 1.0;
+      const clean = sanitizeTouchControlEntry({ ...entry, scale });
+      if (clean) {
+        this.touchLayout[id] = clean;
+        this.applyTouchLayout();
+        if (this.el.touchBtnSizeVal) {
+          this.el.touchBtnSizeVal.textContent = `${Math.round(clean.scale * 100)}%`;
+        }
+        saveTouchLayout(localStorage, this.touchLayout);
+      }
+    });
+    this.bindTouchLayoutDrag();
     document.getElementById('close-scoreboard')?.addEventListener('click', () => {
       this.setScoreboardOpen(false);
       this.cb.onResumePointer();
@@ -350,7 +472,158 @@ export class HudUI {
   }
 
   setPauseOverlay(show) {
-    this.el.pauseHint.classList.toggle('hidden', !show || this.shopOpen || this.emoteTrayOpen);
+    this.el.pauseHint.classList.toggle('hidden', !show || this.shopOpen || this.emoteTrayOpen || this.layoutEditorOpen);
+  }
+
+  applyTouchLayout() {
+    if (typeof document === 'undefined') return;
+    for (const cfg of Object.values(TOUCH_CUSTOMIZABLE_CONTROLS)) {
+      const el = document.getElementById(cfg.elId);
+      if (!el) continue;
+      const entry = this.touchLayout[cfg.id];
+      if (entry) {
+        const size = Math.round(cfg.baseSize * entry.scale);
+        el.style.position = 'fixed';
+        el.style.left = `calc(${entry.x}% - ${size / 2}px)`;
+        el.style.top = `calc(${entry.y}% - ${size / 2}px)`;
+        el.style.right = 'auto';
+        el.style.bottom = 'auto';
+        el.style.width = `${size}px`;
+        el.style.height = `${size}px`;
+        el.style.zIndex = '16';
+        if (cfg.baseFont) {
+          el.style.fontSize = `${Math.max(9, Math.round(cfg.baseFont * entry.scale))}px`;
+        }
+        if (cfg.id === 'joystick') {
+          el.dataset.customLeft = el.style.left;
+          el.dataset.customTop = el.style.top;
+          const knob = document.getElementById('touch-joy-knob');
+          if (knob) {
+            const ks = Math.round(cfg.baseKnobSize * entry.scale);
+            knob.style.width = `${ks}px`;
+            knob.style.height = `${ks}px`;
+          }
+        } else {
+          el.dataset.customPos = '1';
+        }
+      } else {
+        el.style.position = '';
+        el.style.left = '';
+        el.style.top = '';
+        el.style.right = '';
+        el.style.bottom = '';
+        el.style.width = '';
+        el.style.height = '';
+        el.style.fontSize = '';
+        el.style.zIndex = '';
+        delete el.dataset.customLeft;
+        delete el.dataset.customTop;
+        delete el.dataset.customPos;
+        if (cfg.id === 'joystick') {
+          const knob = document.getElementById('touch-joy-knob');
+          if (knob) {
+            knob.style.width = '';
+            knob.style.height = '';
+          }
+        }
+      }
+    }
+  }
+
+  selectTouchControl(controlId) {
+    const cfg = TOUCH_CUSTOMIZABLE_CONTROLS[controlId] || TOUCH_CUSTOMIZABLE_CONTROLS.fire;
+    this.selectedTouchControlId = cfg.id;
+    for (const c of Object.values(TOUCH_CUSTOMIZABLE_CONTROLS)) {
+      document.getElementById(c.elId)?.classList.toggle('layout-selected', c.id === cfg.id);
+    }
+    if (this.el.touchEditorSelected) {
+      this.el.touchEditorSelected.textContent = `Selected: ${cfg.label}`;
+    }
+    const scale = this.touchLayout[cfg.id]?.scale ?? 1.0;
+    if (this.el.touchBtnSizeSlider) {
+      this.el.touchBtnSizeSlider.value = String(scale.toFixed(2));
+    }
+    if (this.el.touchBtnSizeVal) {
+      this.el.touchBtnSizeVal.textContent = `${Math.round(scale * 100)}%`;
+    }
+  }
+
+  openTouchLayoutEditor() {
+    this.layoutEditorOpen = true;
+    this.setShopOpen(false);
+    this.setEmoteTrayOpen(false);
+    this.setScoreboardOpen(false);
+    this.setPauseOverlay(false);
+    document.body.classList.add('editing-touch-layout');
+    document.getElementById('touch-controls')?.classList.remove('hidden');
+    this.el.touchLayoutEditor?.classList.remove('hidden');
+    this.selectTouchControl(this.selectedTouchControlId || 'fire');
+    this.cb.onOpenTouchLayoutEditor?.();
+  }
+
+  closeTouchLayoutEditor() {
+    this.touchLayout = saveTouchLayout(localStorage, this.touchLayout);
+    this.layoutEditorOpen = false;
+    document.body.classList.remove('editing-touch-layout');
+    for (const c of Object.values(TOUCH_CUSTOMIZABLE_CONTROLS)) {
+      document.getElementById(c.elId)?.classList.remove('layout-selected');
+    }
+    this.el.touchLayoutEditor?.classList.add('hidden');
+    if (!this.isTouchMode) {
+      document.getElementById('touch-controls')?.classList.add('hidden');
+    }
+    this.cb.onCloseTouchLayoutEditor?.();
+  }
+
+  bindTouchLayoutDrag() {
+    if (typeof document === 'undefined' || typeof window === 'undefined') return;
+    let activeDrag = null;
+
+    for (const cfg of Object.values(TOUCH_CUSTOMIZABLE_CONTROLS)) {
+      const el = document.getElementById(cfg.elId);
+      if (!el) continue;
+      el.addEventListener('pointerdown', (e) => {
+        if (!this.layoutEditorOpen) return;
+        e.preventDefault();
+        e.stopPropagation();
+        this.selectTouchControl(cfg.id);
+        const rect = el.getBoundingClientRect();
+        activeDrag = {
+          id: cfg.id,
+          pointerId: e.pointerId,
+          startX: e.clientX,
+          startY: e.clientY,
+          origCx: rect.left + rect.width / 2,
+          origCy: rect.top + rect.height / 2,
+        };
+        try {
+          el.setPointerCapture?.(e.pointerId);
+        } catch {}
+      });
+    }
+
+    window.addEventListener('pointermove', (e) => {
+      if (!this.layoutEditorOpen || !activeDrag || e.pointerId !== activeDrag.pointerId) return;
+      e.preventDefault();
+      const vw = Math.max(1, window.innerWidth || 1);
+      const vh = Math.max(1, window.innerHeight || 1);
+      const nx = ((activeDrag.origCx + (e.clientX - activeDrag.startX)) / vw) * 100;
+      const ny = ((activeDrag.origCy + (e.clientY - activeDrag.startY)) / vh) * 100;
+      const prevScale = this.touchLayout[activeDrag.id]?.scale ?? 1.0;
+      const clean = sanitizeTouchControlEntry({ x: nx, y: ny, scale: prevScale });
+      if (clean) {
+        this.touchLayout[activeDrag.id] = clean;
+        this.applyTouchLayout();
+      }
+    });
+
+    const finishDrag = (e) => {
+      if (!activeDrag || e.pointerId !== activeDrag.pointerId) return;
+      activeDrag = null;
+      saveTouchLayout(localStorage, this.touchLayout);
+    };
+    window.addEventListener('pointerup', finishDrag);
+    window.addEventListener('pointercancel', finishDrag);
   }
 
   setShopOpen(open, me = null) {
