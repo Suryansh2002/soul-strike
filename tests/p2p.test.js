@@ -1848,3 +1848,113 @@ test('Touch layout customization clamps coordinates/scales, persists in localSto
     'styles/main.css must not hide #hud-score-btn on touch devices'
   );
 });
+
+test('Mixed Wi-Fi + SIM relay and multi-region host selection prevent oscillation and elect best centroid', () => {
+  // 1. NetClient guest on p2p-relay must NOT report 2-hop relay rtt into peerRtts[hostId]
+  const relaySignals = [];
+  const relayClient = new NetClient({ url: 'ws://mock' });
+  relayClient.playerId = 'p3';
+  relayClient.hostId = 'p1';
+  relayClient.isHost = false;
+  relayClient.transportMode = 'p2p-relay';
+  relayClient.rtt = 160;
+  relayClient.knownPeers.set('p1', { peerId: 'p1' });
+  relayClient.knownPeers.set('p2', { peerId: 'p2' });
+  relayClient.knownPeers.set('p3', { peerId: 'p3' });
+  // Seed a stale RTT entry for a closed/non-open peer to ensure sendPing purges it
+  relayClient.peerRtts.set('p2', 42);
+  relayClient._sendSignal = (obj) => relaySignals.push(obj);
+  relayClient.send = () => {};
+  relayClient.sendPing();
+
+  const latencyMsg = relaySignals.find((m) => m.t === MSG.P2P_LATENCY);
+  assert.ok(latencyMsg);
+  assert.deepEqual(latencyMsg.peerRtts, {}, 'p2p-relay guest must send empty peerRtts without fake host relay RTT');
+  assert.equal(relayClient.peerRtts.has('p2'), false, 'stale closed-channel peerRtts must be purged');
+
+  // Snapshot buffer must drop or replace stale timestamps monotonically across host migration
+  relayClient._handleGameMessage({ t: MSG.SNAPSHOT, st: 1000, pl: [], pj: [] });
+  relayClient._handleGameMessage({ t: MSG.SNAPSHOT, st: 1030, pl: [], pj: [] });
+  relayClient._handleGameMessage({ t: MSG.SNAPSHOT, st: 1010, pl: [], pj: [] });
+  assert.deepEqual(
+    relayClient.snapshots.map((s) => s.st),
+    [1000, 1010],
+    'non-monotonic snapshot timestamps must be trimmed'
+  );
+
+  // 2. Same-home 2 Wi-Fi + 1 Mobile SIM (CGNAT relay) stability:
+  // SIM peer joins first (becomes initial host), followed by 2 Wi-Fi peers with 5ms direct WebRTC RTT.
+  const coordHome = new P2PCoordinator({ hostEvalIntervalMs: 0 });
+  const hw1 = createRecordingSocket();
+  const hw2 = createRecordingSocket();
+  const hw3 = createRecordingSocket();
+  const simHost = coordHome.handleJoin(hw1, { name: 'MobileSIM' });
+  const wifi1 = coordHome.handleJoin(hw2, { name: 'HomeWifi1' });
+  const wifi2 = coordHome.handleJoin(hw3, { name: 'HomeWifi2' });
+  assert.equal(coordHome.hostId, simHost);
+
+  const reportHomeMetrics = () => {
+    coordHome.handleMessage(simHost, { t: MSG.P2P_LATENCY, rtt: 85, jitter: 14, fps: 60, peerRtts: {} });
+    coordHome.handleMessage(wifi1, { t: MSG.P2P_LATENCY, rtt: 38, jitter: 2, fps: 60, peerRtts: { [wifi2]: 5 } });
+    coordHome.handleMessage(wifi2, { t: MSG.P2P_LATENCY, rtt: 40, jitter: 2, fps: 60, peerRtts: { [wifi1]: 5 } });
+  };
+  reportHomeMetrics();
+
+  // First non-forced check builds streak=1 (no premature switch on a single tick)
+  assert.equal(coordHome.evaluateLobbyBestHost('lobby_1', { immediate: true, force: false }), null);
+  assert.equal(coordHome.hostId, simHost);
+
+  // Second confirming check (streak=2) migrates once to best Wi-Fi peer
+  reportHomeMetrics();
+  const electedWifi = coordHome.evaluateLobbyBestHost('lobby_1', { immediate: true, force: false });
+  assert.equal(electedWifi, wifi1);
+  assert.equal(coordHome.hostId, wifi1);
+
+  // Simulate further telemetry where Wi-Fi 1 hosts and SIM reports NO direct peerRtts (relay only);
+  // even after cooldown elapses, host MUST stay locked on wifi1 without oscillating to wifi2
+  const lobbyHome = coordHome.lobbies.get('lobby_1');
+  for (let i = 0; i < 6; i++) {
+    lobbyHome.lastHostSwitchAt = Date.now() - 60000;
+    reportHomeMetrics();
+    assert.equal(coordHome.evaluateLobbyBestHost('lobby_1', { immediate: true, force: false }), null);
+    assert.equal(coordHome.evaluateLobbyBestHost('lobby_1', { immediate: true, force: true }), null);
+    assert.equal(coordHome.hostId, wifi1, '2 Wi-Fi + 1 SIM lobby must never oscillate between Wi-Fi hosts');
+  }
+
+  // 3. Global Multi-Region (Africa SIM + Europe Wi-Fi + India Wi-Fi) & Transient Spike Resilience
+  const coordGlobal = new P2PCoordinator({ hostEvalIntervalMs: 0 });
+  const gw1 = createRecordingSocket();
+  const gw2 = createRecordingSocket();
+  const gw3 = createRecordingSocket();
+  const africaSim = coordGlobal.handleJoin(gw1, { name: 'AfricaSIM' });
+  const europeWifi = coordGlobal.handleJoin(gw2, { name: 'EuropeWiFi' });
+  const indiaWifi = coordGlobal.handleJoin(gw3, { name: 'IndiaWiFi' });
+
+  const reportGlobalBaseline = () => {
+    coordGlobal.handleMessage(africaSim, { t: MSG.P2P_LATENCY, rtt: 95, jitter: 12, fps: 60, peerRtts: {} });
+    coordGlobal.handleMessage(europeWifi, { t: MSG.P2P_LATENCY, rtt: 45, jitter: 2, fps: 60, peerRtts: { [indiaWifi]: 115 } });
+    coordGlobal.handleMessage(indiaWifi, { t: MSG.P2P_LATENCY, rtt: 110, jitter: 3, fps: 60, peerRtts: { [europeWifi]: 115 } });
+  };
+  reportGlobalBaseline();
+
+  // Elects Europe Wi-Fi as overall centroid across Africa SIM + Europe Wi-Fi + India Wi-Fi
+  assert.equal(coordGlobal.evaluateLobbyBestHost('lobby_1', { immediate: true, force: false }), null);
+  reportGlobalBaseline();
+  const electedCentroid = coordGlobal.evaluateLobbyBestHost('lobby_1', { immediate: true, force: false });
+  assert.equal(electedCentroid, europeWifi, 'Europe Wi-Fi centroid should become host');
+  assert.equal(coordGlobal.hostId, europeWifi);
+
+  // Even if Europe suffers a sudden 1-tick lag/FPS spike, EMA + post-election 3-streak hysteresis keeps host stable
+  const lobbyGlobal = coordGlobal.lobbies.get('lobby_1');
+  lobbyGlobal.lastHostSwitchAt = Date.now() - 60000;
+  coordGlobal.handleMessage(europeWifi, {
+    t: MSG.P2P_LATENCY,
+    rtt: 260,
+    jitter: 90,
+    fps: 18,
+    peerRtts: { [indiaWifi]: 185 },
+  });
+  coordGlobal.handleMessage(indiaWifi, { t: MSG.P2P_LATENCY, rtt: 110, jitter: 3, fps: 60, peerRtts: { [europeWifi]: 115 } });
+  assert.equal(coordGlobal.evaluateLobbyBestHost('lobby_1', { immediate: true, force: false }), null);
+  assert.equal(coordGlobal.hostId, europeWifi, 'single transient spike must not trigger host migration');
+});

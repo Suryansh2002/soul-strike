@@ -56,6 +56,8 @@ export class P2PCoordinator {
         lobby.handoverTimer = null;
       }
       lobby.pendingHandoverTargetId = null;
+      lobby.challengerHostId = null;
+      lobby.challengerStreak = 0;
     }
   }
 
@@ -142,6 +144,9 @@ export class P2PCoordinator {
       latestCheckpoint: null,
       createdAt: Date.now(),
       lastHostSwitchAt: 0,
+      latencySwitchCount: 0,
+      challengerHostId: null,
+      challengerStreak: 0,
       pendingHandoverTargetId: null,
       handoverTimer: null,
     };
@@ -171,8 +176,9 @@ export class P2PCoordinator {
     if (d1 > 0 && d2 > 0) return (d1 + d2) * 0.5;
     if (d1 > 0) return d1;
     if (d2 > 0) return d2;
-    if (candidate.rtt > 0 && otherPeer.rtt > 0) return (candidate.rtt + otherPeer.rtt) * 0.5;
-    if (candidate.rtt > 0) return candidate.rtt;
+    if (candidate.rtt > 0 && otherPeer.rtt > 0) return candidate.rtt + otherPeer.rtt;
+    if (candidate.rtt > 0) return candidate.rtt * 2;
+    if (otherPeer.rtt > 0) return otherPeer.rtt * 2;
     return null;
   }
 
@@ -237,7 +243,10 @@ export class P2PCoordinator {
     const lobby = typeof lobbyOrId === 'string' ? this.lobbies.get(lobbyOrId) : lobbyOrId;
     if (!lobby || lobby.peers.size < 2) return null;
     if (lobby.pendingHandoverTargetId) return null;
-    if (!force && Date.now() - (lobby.lastHostSwitchAt || 0) < 15000) return null;
+
+    const hasElectedBefore = (lobby.latencySwitchCount || 0) > 0;
+    const minCooldownMs = hasElectedBefore ? 30000 : 15000;
+    if (!force && Date.now() - (lobby.lastHostSwitchAt || 0) < minCooldownMs) return null;
 
     let bestPeer = null;
     let bestScore = Infinity;
@@ -248,13 +257,35 @@ export class P2PCoordinator {
         bestPeer = peer;
       }
     }
-    if (!bestPeer || bestPeer.id === lobby.hostId) return null;
+    if (!bestPeer || bestPeer.id === lobby.hostId) {
+      lobby.challengerHostId = null;
+      lobby.challengerStreak = 0;
+      return null;
+    }
 
     const currentHost = lobby.peers.get(lobby.hostId);
     const currentScore = currentHost ? this.computePeerLatencyScore(lobby, currentHost) : null;
     if (currentScore === null && !force) return null;
-    if (currentScore !== null && !(bestScore + 25 < currentScore && bestScore < currentScore * 0.78)) {
+
+    const minAbsDelta = !force && hasElectedBefore ? 40 : 25;
+    const maxRatio = !force && hasElectedBefore ? 0.70 : 0.78;
+    if (currentScore !== null && !(bestScore + minAbsDelta < currentScore && bestScore < currentScore * maxRatio)) {
+      lobby.challengerHostId = null;
+      lobby.challengerStreak = 0;
       return null;
+    }
+
+    if (!force) {
+      if (lobby.challengerHostId === bestPeer.id) {
+        lobby.challengerStreak = (lobby.challengerStreak || 0) + 1;
+      } else {
+        lobby.challengerHostId = bestPeer.id;
+        lobby.challengerStreak = 1;
+      }
+      const requiredStreak = hasElectedBefore ? 3 : 2;
+      if (lobby.challengerStreak < requiredStreak) {
+        return null;
+      }
     }
 
     if (immediate || !currentHost?.ws) {
@@ -288,12 +319,17 @@ export class P2PCoordinator {
       lobby.handoverTimer = null;
     }
     lobby.pendingHandoverTargetId = null;
+    lobby.challengerHostId = null;
+    lobby.challengerStreak = 0;
 
     const prevHostId = lobby.hostId;
     const newHost = lobby.peers.get(newHostId);
     lobby.hostId = newHostId;
     lobby.hostToken = generateToken();
     lobby.lastHostSwitchAt = Date.now();
+    if (reason === 'latency') {
+      lobby.latencySwitchCount = (lobby.latencySwitchCount || 0) + 1;
+    }
 
     if (lobby.latestCheckpoint && typeof lobby.latestCheckpoint === 'object') {
       lobby.latestCheckpoint = {
@@ -407,6 +443,8 @@ export class P2PCoordinator {
 
     this.peers.set(peerId, peer);
     lobby.peers.set(peerId, peer);
+    lobby.challengerHostId = null;
+    lobby.challengerStreak = 0;
 
     if (!lobby.managerId || !lobby.peers.has(lobby.managerId)) {
       lobby.managerId = peerId;
@@ -466,23 +504,31 @@ export class P2PCoordinator {
           probeTs: msg.probeTs,
         });
       }
+      const hadSample = peer.lastLatencyAt > 0;
       const parsedRtt = finiteNum(msg.rtt, 0);
       if (parsedRtt > 0) {
-        peer.rtt = clamp(parsedRtt, 1, 2000);
+        const clampedRtt = clamp(parsedRtt, 1, 2000);
+        peer.rtt = peer.rtt !== null && peer.rtt > 0 ? peer.rtt * 0.65 + clampedRtt * 0.35 : clampedRtt;
       }
       if (msg.jitter !== undefined && msg.jitter !== null) {
-        peer.jitter = clamp(finiteNum(msg.jitter, 0), 0, 1000);
+        const clampedJitter = clamp(finiteNum(msg.jitter, 0), 0, 1000);
+        peer.jitter = hadSample ? peer.jitter * 0.65 + clampedJitter * 0.35 : clampedJitter;
       }
       if (msg.fps !== undefined && msg.fps !== null) {
-        peer.fps = clamp(finiteNum(msg.fps, 60), 1, 360);
+        const clampedFps = clamp(finiteNum(msg.fps, 60), 1, 360);
+        peer.fps = hadSample ? peer.fps * 0.65 + clampedFps * 0.35 : clampedFps;
       }
       peer.lastLatencyAt = Date.now();
       if (msg.peerRtts && typeof msg.peerRtts === 'object') {
+        const nextPeerRtts = {};
         for (const [targetId, rttVal] of Object.entries(msg.peerRtts)) {
           if (targetId !== peerId && lobby.peers.has(targetId)) {
-            peer.peerRtts[targetId] = clamp(finiteNum(rttVal, 60), 1, 2000);
+            const sample = clamp(finiteNum(rttVal, 60), 1, 2000);
+            const prev = peer.peerRtts?.[targetId];
+            nextPeerRtts[targetId] = prev > 0 ? prev * 0.65 + sample * 0.35 : sample;
           }
         }
+        peer.peerRtts = nextPeerRtts;
       }
       return;
     }
@@ -566,6 +612,8 @@ export class P2PCoordinator {
     const lobby = this.lobbies.get(peer.lobbyId);
     if (!lobby) return;
     lobby.peers.delete(peerId);
+    lobby.challengerHostId = null;
+    lobby.challengerStreak = 0;
     for (const p of lobby.peers.values()) {
       if (p.peerRtts) delete p.peerRtts[peerId];
     }

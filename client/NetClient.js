@@ -80,6 +80,7 @@ export class NetClient {
   }
 
   _closePeerConnection(peerId) {
+    this.peerRtts.delete(peerId);
     const rec = this.peerConnections.get(peerId);
     if (!rec) return;
     this.peerConnections.delete(peerId);
@@ -104,6 +105,13 @@ export class NetClient {
     const rec = this.peerConnections.get(peerId);
     return Boolean(
       rec && rec.pc && rec.pc.connectionState !== 'failed' && rec.pc.connectionState !== 'closed'
+    );
+  }
+
+  _hasOpenDataChannel(peerId) {
+    const rec = this.peerConnections.get(peerId);
+    return Boolean(
+      rec && (rec.fastDc?.readyState === 'open' || rec.reliableDc?.readyState === 'open')
     );
   }
 
@@ -670,6 +678,9 @@ export class NetClient {
         this.serverTimeOffset = snapOffset;
         this.hasClockSync = true;
       }
+      while (this.snapshots.length > 0 && this.snapshots[this.snapshots.length - 1].st >= msg.st) {
+        this.snapshots.pop();
+      }
       this.snapshots.push(msg);
       if (this.snapshots.length > 36) {
         this.snapshots.shift();
@@ -797,17 +808,19 @@ export class NetClient {
     const peerRtts = {};
     for (const peerId of this.knownPeers.keys()) {
       if (peerId === this.playerId) continue;
+      if (!this._hasOpenDataChannel(peerId)) {
+        this.peerRtts.delete(peerId);
+        continue;
+      }
       const measured = this.peerRtts.get(peerId);
       if (measured > 0) {
         peerRtts[peerId] = Math.max(1, Math.round(measured));
       }
     }
-    if (!this.isHost && this.rtt > 0 && !peerRtts[this.hostId]) {
+    if (!this.isHost && this.transportMode === 'p2p-udp' && this.rtt > 0 && !peerRtts[this.hostId]) {
       peerRtts[this.hostId] = Math.max(1, Math.round(this.rtt));
     }
-    if (Object.keys(peerRtts).length > 0) {
-      latencyReport.peerRtts = peerRtts;
-    }
+    latencyReport.peerRtts = peerRtts;
 
     this._sendSignal(latencyReport);
     this.send({ t: MSG.PING, c: performance.now() });
